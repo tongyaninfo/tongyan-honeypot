@@ -1,0 +1,4 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><RootNamespace>Honeypot.Protocols.Common</RootNamespace><AssemblyName>Honeypot.Protocols.Common</AssemblyName></PropertyGroup>
+  <ItemGroup><ProjectReference Include="../Honeypot.Protocol.Abstractions/Honeypot.Protocol.Abstractions.csproj" /></ItemGroup>
+</Project>

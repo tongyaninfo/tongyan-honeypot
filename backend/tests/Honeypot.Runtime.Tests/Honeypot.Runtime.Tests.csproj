@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <!-- 与 API 共用 EF Core SQLite；漏洞审计结果保留为警告，避免测试因依赖审计阻断。 -->
+    <WarningsNotAsErrors>$(WarningsNotAsErrors);NU1903</WarningsNotAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/Honeypot.Protocol.Abstractions/Honeypot.Protocol.Abstractions.csproj" />
+    <ProjectReference Include="../../src/Honeypot.Runtime/Honeypot.Runtime.csproj" />
+    <ProjectReference Include="../../src/Honeypot.Protocols.Ssh/Honeypot.Protocols.Ssh.csproj" />
+    <ProjectReference Include="../../src/Honeypot.Protocols.Rdp/Honeypot.Protocols.Rdp.csproj" />
+    <ProjectReference Include="../../src/Honeypot.Protocols.MySql/Honeypot.Protocols.MySql.csproj" />
+    <ProjectReference Include="../../src/Honeypot.Protocols.Mongo/Honeypot.Protocols.Mongo.csproj" />
+    <ProjectReference Include="../../src/Honeypot.Api/Honeypot.Api.csproj" />
+  </ItemGroup>
+</Project>

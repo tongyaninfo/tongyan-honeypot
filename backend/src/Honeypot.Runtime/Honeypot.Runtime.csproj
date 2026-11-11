@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>Honeypot.Runtime</RootNamespace>
+    <AssemblyName>Honeypot.Runtime</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Honeypot.Protocol.Abstractions/Honeypot.Protocol.Abstractions.csproj" />
+    <ProjectReference Include="../Honeypot.Protocols.Common/Honeypot.Protocols.Common.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+</Project>

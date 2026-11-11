@@ -1,0 +1,42 @@
+# .NET
+**/bin/
+**/obj/
+*.user
+*.suo
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.umi/
+frontend/.cache/
+frontend/coverage/
+frontend/.env
+frontend/.env.*
+!frontend/.env.example
+
+# Runtime and local verification
+# 注意：data/ 只锚定仓库根目录的运行时数据目录。不带前导 / 的 data/ 会在
+# macOS 这类大小写不敏感的文件系统上误伤源码目录 backend/src/Honeypot.Api/Data/。
+.local/
+artifacts/
+logs/
+/data/
+*.db
+*.db-shm
+*.db-wal
+*.log
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Secrets and local deployment material
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+*.p12

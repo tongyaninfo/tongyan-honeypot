@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <RootNamespace>Honeypot.Api</RootNamespace>
+    <AssemblyName>Honeypot.Api</AssemblyName>
+    <!-- EF Core SQLite 当前依赖的原生 SQLite 包会触发 NuGetAudit NU1903；保留审计记录但不阻断本地构建。 -->
+    <WarningsNotAsErrors>$(WarningsNotAsErrors);NU1903</WarningsNotAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Honeypot.Shared/Honeypot.Shared.csproj" />
+    <ProjectReference Include="../Honeypot.Protocol.Abstractions/Honeypot.Protocol.Abstractions.csproj" />
+    <ProjectReference Include="../Honeypot.Runtime/Honeypot.Runtime.csproj" />
+    <ProjectReference Include="../Honeypot.Engine/Honeypot.Engine.csproj" />
+    <ProjectReference Include="../Honeypot.Protocols.Builtin/Honeypot.Protocols.Builtin.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="MailKit" Version="4.17.0" />
+    <!-- MailKit 的传递依赖基线为 Pkcs 10.0.0，此处显式使用已修复的补丁版本。 -->
+    <PackageReference Include="System.Security.Cryptography.Pkcs" Version="10.0.13" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.9" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.9" PrivateAssets="all" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="Resources/EmailTemplates/**/*.html" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,61 @@
+通研 Honeypot（Tongyan Honeypot）
+Copyright 2026 tongyaninfo（通研信息）
+
+This product includes software developed by the tongyaninfo project.
+
+本项目以 Apache License 2.0 发布，完整许可文本见 LICENSE。产品官网：https://honeypot.tongyaninfo.com/ ，
+通研官网：https://www.tongyaninfo.com/ 。
+
+===============================================================================
+第三方软件组件
+Third-Party Software Components
+===============================================================================
+
+后端与前端依赖的第三方库分别适用其各自的许可证。依赖清单与具体版本见
+`backend/**/*.csproj`、`frontend/package.json` 与 `frontend/package-lock.json`。
+
+后端主要依赖（.NET 10 运行时与 ASP.NET Core 之外）：
+
+- Entity Framework Core（SQLite 提供程序）：MIT License
+- MailKit：MIT License
+- StackExchange.Redis、MongoDB.Driver、MySqlConnector、Npgsql、
+  Microsoft.Data.SqlClient：各自适用 MIT / Apache License 2.0
+- Elastic.Clients.Elasticsearch：Apache License 2.0 或 Elastic License 2.0
+  （使用时以所选授权为准）
+- InfluxDB.Client：MIT License
+- SMBLibrary：LGPL-3.0 License
+- System.Security.Cryptography.Pkcs：MIT License
+- xunit、Microsoft.NET.Test.Sdk：Apache License 2.0 / MIT License
+
+管理台主要依赖：
+
+- React、React DOM、Umi Max、Ant Design、Ant Design Pro、ProComponents、
+  Biome、Vitest、Testing Library、Tailwind CSS：MIT License
+- d3、topojson-client、china-division、dayjs、highlight.js：BSD / ISC / MIT
+- SQLite：Public Domain
+
+管理台沿用 Ant Design Pro 模板的部分资产，模板许可文本随仓库保存在
+`frontend/LICENSE`（MIT）。本项目对模板的修改同样以 Apache License 2.0 发布；
+第三方组件本身仍适用其原始许可证。
+
+===============================================================================
+数据与隐私提示
+Data and Privacy Notes
+===============================================================================
+
+本产品用于在隔离网络中记录不可信连接与认证尝试，观测数据可能包含来源网络
+地址、账号名和攻击者提交的认证材料。部署方应自行确定采集范围、访问权限与
+保留期限，并遵守适用的隐私与合规要求。
+
+仓库中的示例、截图、测试数据与文档均为合成内容，不含真实凭据或真实观测数据。
+认证材料在运行时进入受权限、留存和审计控制的加密证据仓库，不写入普通日志。
+
+===============================================================================
+免责声明
+Disclaimer
+===============================================================================
+
+本项目按 Apache License 2.0 提供，不附带任何明示或默示担保。项目当前处于
+早期阶段，功能范围、接口与数据结构可能变化；截图与文档用于说明操作，不构成
+性能、容量或安全验收结论。蜜罐服务具有一定风险，只应部署在经过隔离与授权的
+网络环境中，由部署方自行承担监听端口暴露带来的责任。

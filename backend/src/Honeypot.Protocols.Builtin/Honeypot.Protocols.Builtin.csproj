@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="../Honeypot.Protocol.Abstractions/Honeypot.Protocol.Abstractions.csproj" />
+    <ProjectReference Include="../Honeypot.Protocols.Ssh/Honeypot.Protocols.Ssh.csproj" />
+    <ProjectReference Include="../Honeypot.Protocols.Rdp/Honeypot.Protocols.Rdp.csproj" />
+    <ProjectReference Include="../Honeypot.Protocols.MySql/Honeypot.Protocols.MySql.csproj" />
+    <ProjectReference Include="../Honeypot.Protocols.MsSql/Honeypot.Protocols.MsSql.csproj" />
+    <ProjectReference Include="../Honeypot.Protocols.Mongo/Honeypot.Protocols.Mongo.csproj" />
+    <ProjectReference Include="../Honeypot.Protocols.PostgreSql/Honeypot.Protocols.PostgreSql.csproj" />
+    <ProjectReference Include="../Honeypot.Protocols.Redis/Honeypot.Protocols.Redis.csproj" />
+    <ProjectReference Include="../Honeypot.Protocols.Oracle/Honeypot.Protocols.Oracle.csproj" />
+    <ProjectReference Include="../Honeypot.Protocols.Db2/Honeypot.Protocols.Db2.csproj" />
+    <ProjectReference Include="../Honeypot.Protocols.Memcached/Honeypot.Protocols.Memcached.csproj" />
+    <ProjectReference Include="../Honeypot.Protocols.HBase/Honeypot.Protocols.HBase.csproj" />
+    <ProjectReference Include="../Honeypot.Protocols.InfluxDb/Honeypot.Protocols.InfluxDb.csproj" />
+    <ProjectReference Include="../Honeypot.Protocols.Elasticsearch/Honeypot.Protocols.Elasticsearch.csproj" />
+    <ProjectReference Include="../Honeypot.Protocols.Telnet/Honeypot.Protocols.Telnet.csproj" />
+    <ProjectReference Include="../Honeypot.Protocols.Smb/Honeypot.Protocols.Smb.csproj" />
+    <ProjectReference Include="../Honeypot.Protocols.Nfs/Honeypot.Protocols.Nfs.csproj" />
+  </ItemGroup>
+  <ItemGroup><FrameworkReference Include="Microsoft.AspNetCore.App" /></ItemGroup>
+</Project>

@@ -1,0 +1,4 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><RootNamespace>Honeypot.Protocols.Nfs</RootNamespace><AssemblyName>Honeypot.Protocols.Nfs</AssemblyName></PropertyGroup>
+  <ItemGroup><ProjectReference Include="../Honeypot.Protocols.Common/Honeypot.Protocols.Common.csproj" /></ItemGroup>
+</Project>

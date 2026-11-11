@@ -1,0 +1,1 @@
+<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><RootNamespace>Honeypot.Protocols.MsSql</RootNamespace><AssemblyName>Honeypot.Protocols.MsSql</AssemblyName></PropertyGroup><ItemGroup><ProjectReference Include="../Honeypot.Protocols.Common/Honeypot.Protocols.Common.csproj" /></ItemGroup></Project>

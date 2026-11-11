@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>Honeypot.Shared</RootNamespace>
+    <AssemblyName>Honeypot.Shared</AssemblyName>
+  </PropertyGroup>
+</Project>

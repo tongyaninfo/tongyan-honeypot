@@ -1,0 +1,4 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><RootNamespace>Honeypot.Protocols.Smb</RootNamespace><AssemblyName>Honeypot.Protocols.Smb</AssemblyName></PropertyGroup>
+  <ItemGroup><ProjectReference Include="../Honeypot.Protocols.Common/Honeypot.Protocols.Common.csproj" /></ItemGroup>
+</Project>

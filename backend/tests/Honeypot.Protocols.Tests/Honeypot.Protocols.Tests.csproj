@@ -1,0 +1,47 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- 使用 .NET 真实 NTLM/SPNEGO 客户端验证，不依赖宿主安装 GSSAPI NTLM 插件。 -->
+    <RuntimeHostConfigurationOption Include="System.Net.Security.UseManagedNtlm" Value="true" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <!-- 只用于隔离回环兼容验证，不进入生产适配器依赖。 -->
+    <PackageReference Include="MySqlConnector" Version="2.6.2" />
+    <PackageReference Include="MongoDB.Driver" Version="3.13.0" />
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="7.1.1" />
+    <PackageReference Include="Npgsql" Version="10.0.0" />
+    <PackageReference Include="StackExchange.Redis" Version="3.0.17" />
+    <!-- 固定 SqlClient 的已修复传递依赖，保留漏洞审计为错误。 -->
+    <PackageReference Include="System.Security.Cryptography.Pkcs" Version="10.0.13" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/Honeypot.Protocols.Ssh/Honeypot.Protocols.Ssh.csproj" />
+    <ProjectReference Include="../../src/Honeypot.Protocols.MySql/Honeypot.Protocols.MySql.csproj" />
+    <ProjectReference Include="../../src/Honeypot.Protocols.Mongo/Honeypot.Protocols.Mongo.csproj" />
+    <ProjectReference Include="../../src/Honeypot.Protocols.MsSql/Honeypot.Protocols.MsSql.csproj" />
+    <ProjectReference Include="../../src/Honeypot.Protocols.Rdp/Honeypot.Protocols.Rdp.csproj" />
+    <ProjectReference Include="../../src/Honeypot.Protocols.Common/Honeypot.Protocols.Common.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/Honeypot.Protocols.PostgreSql/Honeypot.Protocols.PostgreSql.csproj" />
+    <ProjectReference Include="../../src/Honeypot.Protocols.Redis/Honeypot.Protocols.Redis.csproj" />
+    <ProjectReference Include="../../src/Honeypot.Protocols.Memcached/Honeypot.Protocols.Memcached.csproj" />
+    <ProjectReference Include="../../src/Honeypot.Protocols.Telnet/Honeypot.Protocols.Telnet.csproj" />
+    <ProjectReference Include="../../src/Honeypot.Protocols.Smb/Honeypot.Protocols.Smb.csproj" />
+    <ProjectReference Include="../../src/Honeypot.Protocols.Nfs/Honeypot.Protocols.Nfs.csproj" />
+    <ProjectReference Include="../../src/Honeypot.Protocols.HBase/Honeypot.Protocols.HBase.csproj" />
+    <ProjectReference Include="../../src/Honeypot.Protocols.InfluxDb/Honeypot.Protocols.InfluxDb.csproj" />
+    <ProjectReference Include="../../src/Honeypot.Protocols.Elasticsearch/Honeypot.Protocols.Elasticsearch.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="SMBLibrary" Version="1.5.8.1" />
+    <PackageReference Include="Elastic.Clients.Elasticsearch" Version="9.5.2" />
+    <PackageReference Include="InfluxDB.Client" Version="5.0.0" />
+  </ItemGroup>
+<ItemGroup><ProjectReference Include="../../src/Honeypot.Protocols.Db2/Honeypot.Protocols.Db2.csproj" /></ItemGroup>
+  <ItemGroup><ProjectReference Include="../../src/Honeypot.Protocols.Oracle/Honeypot.Protocols.Oracle.csproj" /></ItemGroup>
+</Project>

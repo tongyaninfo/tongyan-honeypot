@@ -1,0 +1,1 @@
+<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><RootNamespace>Honeypot.Protocols.Ssh</RootNamespace><AssemblyName>Honeypot.Protocols.Ssh</AssemblyName></PropertyGroup><ItemGroup><ProjectReference Include="../Honeypot.Protocols.Common/Honeypot.Protocols.Common.csproj" /></ItemGroup></Project>

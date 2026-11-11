@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>Honeypot.Engine</RootNamespace>
+    <AssemblyName>Honeypot.Engine</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Honeypot.Shared/Honeypot.Shared.csproj" />
+    <ProjectReference Include="../Honeypot.Protocol.Abstractions/Honeypot.Protocol.Abstractions.csproj" />
+  </ItemGroup>
+</Project>

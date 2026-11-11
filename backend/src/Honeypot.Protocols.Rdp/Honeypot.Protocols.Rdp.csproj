@@ -1,0 +1,1 @@
+<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><RootNamespace>Honeypot.Protocols.Rdp</RootNamespace><AssemblyName>Honeypot.Protocols.Rdp</AssemblyName></PropertyGroup><ItemGroup><ProjectReference Include="../Honeypot.Protocols.Common/Honeypot.Protocols.Common.csproj" /></ItemGroup></Project>
