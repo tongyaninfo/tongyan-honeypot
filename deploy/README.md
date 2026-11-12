@@ -25,9 +25,22 @@ dotnet run --project backend/src/Honeypot.Api/Honeypot.Api.csproj --no-launch-pr
 - **最小权限**：运行账号只拥有数据目录与静态资源的读写权限；不要用 root 运行。
 - **数据卷**：数据目录、保护密钥目录（`Honeypot:NotificationKeyDirectory`）与备份目录独立挂载，目录权限最小化。
 - **端口与上限**：为每个监听实例设置绑定地址、并发连接与单连接字节上限；规划日志与暂存容量。
-- **外部投递**：Syslog、SMTP 与 IP 归属地默认关闭，按需配置；TLS 默认校验服务端证书。
+- **外部投递与智能体接入**：Syslog、SMTP、IP 归属地与 MCP 服务默认关闭，按需配置；TLS 默认校验服务端证书。
 - **备份与回滚**：升级前备份数据目录与保护密钥；应用启动会执行 SQLite 迁移，回滚需要保留旧版本与对应备份。
 - **健康检查**：`GET /health` 用于存活探测，不代表监听端口或外部投递已验证。
+
+## MCP 接入配置
+
+MCP 复用管理台域名和端口。升级前备份数据目录；应用启动会执行新增的三表迁移。服务初始关闭，可由管理员在页面启用。使用反代时需要转发 `/mcp`，保留外部 `Host` 和 MCP 请求头，不缓冲 Streamable HTTP 响应；外部 HTTPS 可由代理终止。
+
+| 配置（环境变量写法） | 用途 |
+| --- | --- |
+| `Honeypot__Mcp__AllowedHosts__0` | 精确允许的非回环主机名、IP 或含端口的 Host。多项使用递增索引；不使用通配符。 |
+| `Honeypot__Mcp__TrustedProxies__0` | 受信的代理 IP。仅从该代理接受一跳的 `X-Forwarded-For` 和 `X-Forwarded-Proto`；代理必须覆盖来自外部的同名头。 |
+| `Honeypot__Mcp__InsecureHttpNetworks__0` | 允许使用明文 HTTP 的隔离网段（CIDR）。回环默认允许；其他来源使用 HTTPS。 |
+| `Honeypot__Mcp__AllowedInstanceBindAddresses__0` | 允许 MCP 启动或开启自动恢复的非回环实例绑定地址，填明确的隔离私网 IP。回环地址默认允许，通配地址不允许。 |
+
+管理台显示和复制的是浏览器当前 origin。若管理 API 由不同站点提供，仍需让管理台的外部 origin 代理 `/mcp`。使用真实流量前验证反代传递的 IP 和协议、HTTPS 证书链、客户端 Bearer 请求头，以及 SQLite 审计留存所需空间。回滚先停止 MCP，再切回已验证兼容的旧制品，保留新增表。
 
 ## 制品组成
 

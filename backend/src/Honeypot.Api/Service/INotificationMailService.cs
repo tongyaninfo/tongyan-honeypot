@@ -6,6 +6,7 @@ public interface INotificationMailService
 {
     Task<NotificationTaskResult> QueueTestAsync(TestEmailRequest request, string requestedBy, CancellationToken cancellationToken = default);
     Task<NotificationTaskResult> QueueReportAsync(ReportSendRequest request, string requestedBy, CancellationToken cancellationToken = default);
+    Task<NotificationTaskResult> QueueDefaultReportAsync(ReportQuery query, string mcpKeyId, Guid requestId, CancellationToken cancellationToken = default);
     Task<NotificationTaskResult> RetryAsync(string id, string requestedBy, CancellationToken cancellationToken = default);
     Task<NotificationPage<EmailDeliverySummary>> GetDeliveriesAsync(EmailDeliveryQuery query, CancellationToken cancellationToken = default);
     Task<EmailDeliveryDetails?> GetDeliveryAsync(string id, CancellationToken cancellationToken = default);

@@ -60,6 +60,10 @@
 
 ![Syslog 配置：转发目标、测试消息和投递状态](docs/images/syslog.png)
 
+### MCP 服务
+
+在 **系统管理 → MCP 服务** 为智能体启用接入并创建 API Key。每个 Key 可单独授予运行总览、威胁调查、报告和实例管理等工具权限。调用记录支持按来源 IP、Key、工具和结果筛选，并可配置留存天数。接入使用同源 `/mcp`，支持 HTTPS 和显式允许的内网 HTTP。详见 [MCP 服务实施方案](docs/spec/MCP%20服务实施方案.md)。
+
 ## 快速开始
 
 需要 .NET 10 SDK（以 [global.json](global.json) 为准）、Node.js 22 或更高版本及 npm。以下命令适用于 Bash 或 Zsh。

@@ -18,6 +18,7 @@ Third-Party Software Components
 
 - Entity Framework Core（SQLite 提供程序）：MIT License
 - MailKit：MIT License
+- ModelContextProtocol.AspNetCore（MCP C# SDK）：MIT License
 - StackExchange.Redis、MongoDB.Driver、MySqlConnector、Npgsql、
   Microsoft.Data.SqlClient：各自适用 MIT / Apache License 2.0
 - Elastic.Clients.Elasticsearch：Apache License 2.0 或 Elastic License 2.0

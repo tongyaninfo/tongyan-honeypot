@@ -93,6 +93,8 @@ public sealed record EmailDeliveryQuery
     public string? Recipient { get; init; }
     public DateTimeOffset? FromUtc { get; init; }
     public DateTimeOffset? ToUtc { get; init; }
+    /// <summary>报告工具只展示报告邮件，不含投递测试。</summary>
+    public bool ReportsOnly { get; init; }
 }
 
 public sealed record ReportHistoryItem(

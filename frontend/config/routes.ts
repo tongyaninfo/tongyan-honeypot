@@ -71,6 +71,7 @@ export default [
       { path: '/system/notifications', name: '通知设置', component: './system/notifications', access: 'canAdmin' },
       { path: '/system/mail-records', name: '邮件记录', component: './system/mail-records', access: 'canAdmin' },
       { path: '/system/syslog', name: 'Syslog 配置', component: './system/syslog', access: 'canAdmin' },
+      { path: '/system/mcp', name: 'MCP 服务', component: './system/mcp', access: 'canAdmin' },
     ],
   },
   {

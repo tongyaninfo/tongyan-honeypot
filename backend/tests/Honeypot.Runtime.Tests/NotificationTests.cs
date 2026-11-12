@@ -154,6 +154,27 @@ public sealed class NotificationTests
     }
 
     [Fact]
+    public async Task McpQueueUsesConfiguredRecipientsAndDeduplicatesAfterServiceRecreation()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        fixture.Settings.Value = fixture.Settings.Value with { DefaultRecipients = ["reader@example.test", "operator@example.test"] };
+        var requestId = Guid.NewGuid();
+        var queued = await fixture.Service.QueueDefaultReportAsync(new() { Period = "day" }, "synthetic-key", requestId);
+        var deliveries = await fixture.Service.GetDeliveriesAsync(new() { ReportsOnly = true });
+        Assert.Equal(new[] { "operator@example.test", "reader@example.test" }, deliveries.Items.Select(item => item.Recipient).Order(StringComparer.Ordinal));
+
+        fixture.Settings.Value = fixture.Settings.Value with { DefaultRecipients = ["replacement@example.test"] };
+        var restarted = fixture.CreateService();
+        var retry = await restarted.QueueDefaultReportAsync(new() { Period = "day" }, "synthetic-key", requestId);
+        Assert.Equal(queued.DeliveryIds, retry.DeliveryIds);
+        var conflict = await Assert.ThrowsAsync<NotificationException>(() =>
+            restarted.QueueDefaultReportAsync(new() { Period = "week" }, "synthetic-key", requestId));
+        Assert.Equal("CONFLICT", conflict.Code);
+        Assert.Equal(2, (await restarted.GetDeliveriesAsync(new() { ReportsOnly = true })).Total);
+        Assert.Empty(fixture.Transport.Sent);
+    }
+
+    [Fact]
     public async Task UnknownResultIsNotAutomaticallyRetried()
     {
         await using var fixture = await Fixture.CreateAsync();

@@ -192,6 +192,171 @@ namespace Honeypot.Api.Data.Migrations
                     b.ToTable("listener_bindings", (string)null);
                 });
 
+            modelBuilder.Entity("Honeypot.Api.Data.Models.McpApiKeyEntity", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CreatedBy")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("CreatedUnixMs")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("ExpiresUnixMs")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("InstanceGrantsJson")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("LastUsedUnixMs")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Mode")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PermissionsJson")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Prefix")
+                        .IsRequired()
+                        .HasMaxLength(24)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("RevokedUnixMs")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<byte[]>("SecretDigest")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("BLOB");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Prefix")
+                        .IsUnique();
+
+                    b.HasIndex("CreatedUnixMs", "Id");
+
+                    b.ToTable("mcp_api_keys", (string)null);
+                });
+
+            modelBuilder.Entity("Honeypot.Api.Data.Models.McpCallAuditEntity", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("DetailsJson")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("DurationMs")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("HttpMethod")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int?>("HttpStatus")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("KeyId")
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("KeyName")
+                        .HasMaxLength(100)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("KeyPrefix")
+                        .HasMaxLength(24)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("McpMethod")
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("OccurredUnixMs")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Result")
+                        .IsRequired()
+                        .HasMaxLength(24)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SourceIp")
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Tool")
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("KeyId", "OccurredUnixMs");
+
+                    b.HasIndex("OccurredUnixMs", "Id");
+
+                    b.HasIndex("Result", "OccurredUnixMs");
+
+                    b.HasIndex("SourceIp", "OccurredUnixMs");
+
+                    b.HasIndex("Tool", "OccurredUnixMs");
+
+                    b.ToTable("mcp_call_audits", (string)null);
+                });
+
+            modelBuilder.Entity("Honeypot.Api.Data.Models.McpSettingsEntity", b =>
+                {
+                    b.Property<int>("Id")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("AuditRetentionDays")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("Enabled")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("UpdatedBy")
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("UpdatedUnixMs")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("mcp_settings", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_mcp_settings_retention", "AuditRetentionDays BETWEEN 1 AND 365");
+
+                            t.HasCheckConstraint("CK_mcp_settings_singleton", "Id = 1");
+                        });
+
+                    b.HasData(
+                        new
+                        {
+                            Id = 1,
+                            AuditRetentionDays = 30,
+                            Enabled = false
+                        });
+                });
+
             modelBuilder.Entity("Honeypot.Api.Data.Models.ReportEventEntity", b =>
                 {
                     b.Property<string>("EventId")

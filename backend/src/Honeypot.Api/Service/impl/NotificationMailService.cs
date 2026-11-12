@@ -50,22 +50,49 @@ public sealed class NotificationMailService(
         finally { _queueGate.Release(); }
     }
 
-    public async Task<NotificationTaskResult> QueueReportAsync(ReportSendRequest request, string requestedBy, CancellationToken cancellationToken = default)
+    public Task<NotificationTaskResult> QueueReportAsync(ReportSendRequest request, string requestedBy, CancellationToken cancellationToken = default) =>
+        QueueReportCoreAsync(request, requestedBy, null, cancellationToken);
+
+    public Task<NotificationTaskResult> QueueDefaultReportAsync(ReportQuery query, string mcpKeyId, Guid requestId,
+        CancellationToken cancellationToken = default)
     {
-        var settings = await settingsStore.GetAsync(cancellationToken);
-        EnsureEnabled(settings);
-        var recipients = ResolveRecipients(request.Recipients, settings.DefaultRecipients);
-        var kind = request.Period switch { "day" => "Daily", "week" => "Weekly", "month" => "Monthly", "custom" => "Custom", _ => throw new NotificationException("VALIDATION_ERROR", "报告周期无效。") };
+        // MCP 工具的业务入口不允许指定收件人；请求标识只在同一 Key 内生效。
+        var requester = $"mcp:{mcpKeyId}";
+        return QueueReportCoreAsync(new() { Period = query.Period, StartAtUtc = query.StartAtUtc, EndAtUtc = query.EndAtUtc },
+            requester, $"{requester}:{requestId:N}", cancellationToken);
+    }
+
+    private async Task<NotificationTaskResult> QueueReportCoreAsync(ReportSendRequest request, string requestedBy,
+        string? stableTaskKey, CancellationToken cancellationToken)
+    {
         await _queueGate.WaitAsync(cancellationToken);
         try
         {
             await using var db = await database.CreateDbContextAsync(cancellationToken);
+            var kind = request.Period switch { "day" => "Daily", "week" => "Weekly", "month" => "Monthly", "custom" => "Custom", _ => throw new NotificationException("VALIDATION_ERROR", "报告周期无效。") };
+            if (stableTaskKey is not null && await db.Set<ReportSnapshotEntity>().AsNoTracking()
+                    .SingleOrDefaultAsync(row => row.TaskKey == stableTaskKey, cancellationToken) is { } existing)
+            {
+                if (existing.PeriodKind != kind || (kind == "Custom" &&
+                    (existing.PeriodStartUnixMs != request.StartAtUtc?.ToUnixTimeMilliseconds() ||
+                     existing.PeriodEndUnixMs != request.EndAtUtc?.ToUnixTimeMilliseconds())))
+                    throw new NotificationException("CONFLICT", "此请求标识已用于其他报告参数。");
+                var deliveryIds = await db.Set<EmailDeliveryEntity>().AsNoTracking()
+                    .Where(row => row.ReportSnapshotId == existing.Id).OrderBy(row => row.Id).Select(row => row.Id)
+                    .ToArrayAsync(cancellationToken);
+                return new(deliveryIds, "此请求已入队，返回原报告任务编号。");
+            }
+
+            var settings = await settingsStore.GetAsync(cancellationToken);
+            EnsureEnabled(settings);
+            var recipients = ResolveRecipients(request.Recipients, settings.DefaultRecipients);
             var threshold = time.GetUtcNow().AddSeconds(-settings.ResendCooldownSeconds).ToUnixTimeMilliseconds();
             if (await db.Set<EmailDeliveryEntity>().AnyAsync(item => item.RequestedBy == requestedBy && item.Kind != "Test" && item.CreatedUnixMs > threshold, cancellationToken))
                 throw RateLimited("报告邮件仍在冷却时间内，请稍后重试。");
             await EnsureQueueCapacityAsync(db, recipients.Length, cancellationToken);
             var report = await reports.GenerateAsync(new ReportQuery { Period = request.Period, StartAtUtc = request.StartAtUtc, EndAtUtc = request.EndAtUtc }, cancellationToken);
-            return await PersistReportAsync(db, kind, report, recipients, "manual:" + ids.NewId(), requestedBy, cancellationToken);
+            var queued = await PersistReportAsync(db, kind, report, recipients, stableTaskKey ?? "manual:" + ids.NewId(), requestedBy, cancellationToken);
+            return stableTaskKey is null ? queued : queued with { DeliveryIds = queued.DeliveryIds.Order(StringComparer.Ordinal).ToArray() };
         }
         finally { _queueGate.Release(); }
     }
@@ -103,6 +130,7 @@ public sealed class NotificationMailService(
         ValidatePage(query.Page, query.PageSize);
         await using var db = await database.CreateDbContextAsync(cancellationToken);
         var rows = db.Set<EmailDeliveryEntity>().AsNoTracking();
+        if (query.ReportsOnly) rows = rows.Where(item => item.ReportSnapshotId != null);
         if (!string.IsNullOrWhiteSpace(query.Kind)) rows = rows.Where(item => item.Kind == query.Kind);
         if (!string.IsNullOrWhiteSpace(query.Status)) rows = rows.Where(item => item.Status == query.Status);
         if (!string.IsNullOrWhiteSpace(query.Recipient)) rows = rows.Where(item => item.Recipient.Contains(query.Recipient));

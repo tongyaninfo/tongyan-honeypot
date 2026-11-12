@@ -24,6 +24,9 @@ builder.Services.AddSingleton<ISyslogDeliveryService>(services => services.GetRe
 builder.Services.AddHostedService(services => services.GetRequiredService<SyslogDeliveryWorker>());
 builder.Services.AddSingleton<ILoggerProvider, SyslogLoggerProvider>();
 builder.Logging.AddFilter<SyslogLoggerProvider>(null, LogLevel.Trace);
+// MCP 正文只进入受控调用审计，不交由 SDK 或 Syslog 的诊断日志记录。
+builder.Logging.AddFilter("ModelContextProtocol", LogLevel.None);
+builder.Logging.AddFilter<SyslogLoggerProvider>("ModelContextProtocol", LogLevel.None);
 builder.Services.AddSingleton<IThreatDecisionEngine, ThreatDecisionEngine>();
 builder.Services.AddSingleton<IUserIdentityService, FileUserIdentityService>();
 builder.Services.AddIPLocation();
@@ -31,6 +34,7 @@ var databasePath = HoneypotDbOptions.ResolveDatabasePath(builder.Configuration, 
 builder.Services.AddDbContextFactory<HoneypotDbContext>(options => options.UseSqlite($"Data Source={databasePath};Cache=Shared;Foreign Keys=True"));
 builder.Services.AddHostedService<HoneypotDbInitializer>();
 builder.Services.AddHoneypotRuntime();
+builder.Services.AddSingleton<ServiceInstanceOperations>();
 builder.Services.AddBuiltinProtocolAdapters();
 builder.Services.AddSingleton<IThreatProfileStore, InMemoryThreatProfileStore>();
 builder.Services.AddSingleton<IInteractionEventStore, InMemoryInteractionEventStore>();
@@ -59,12 +63,15 @@ builder.Services.AddSingleton<IProtocolAdapterRegistry>(services =>
 });
 builder.Services.AddCors(options => options.AddPolicy("local-development", policy =>
     policy.AllowAnyHeader().AllowAnyMethod().WithOrigins("http://localhost:8000")));
+builder.Services.AddHoneypotMcpPersistence();
+builder.Services.AddHoneypotMcpTransport(builder.Configuration);
 
 var app = builder.Build();
 var syslog = app.Services.GetRequiredService<ISyslogPublisher>();
 syslog.Publish("honeypot-host", "HOST_STARTING", SyslogSeverity.Notice);
 app.Lifetime.ApplicationStarted.Register(() => syslog.Publish("honeypot-host", "HOST_READY", SyslogSeverity.Notice));
 app.Lifetime.ApplicationStopping.Register(() => syslog.Publish("honeypot-host", "HOST_STOPPING", SyslogSeverity.Notice));
+app.UseHoneypotMcpTransport();
 app.UseMiddleware<SyslogRequestAuditMiddleware>();
 app.UseDefaultFiles();
 app.UseStaticFiles();
@@ -213,14 +220,14 @@ app.MapGet("/api/v1/service-types/{adapterKey}/capabilities", (string adapterKey
 app.MapGet("/api/v1/service-instances", (IServiceInstanceStore store) =>
     Results.Ok(ApiResult<IReadOnlyCollection<ServiceInstance>>.Ok(store.GetAll())));
 
-app.MapPost("/api/v1/service-instances", (ServiceInstance instance, IServiceInstanceStore store) =>
+app.MapPost("/api/v1/service-instances", async (ServiceInstance instance, ServiceInstanceOperations operations, CancellationToken cancellationToken) =>
 {
     if (instance.Bindings.Count == 0)
     {
         return Results.BadRequest(ApiResult<object>.Fail("VALIDATION_ERROR", "At least one listener binding is required."));
     }
 
-    return Results.Ok(ApiResult<ServiceInstance>.Ok(store.Upsert(instance)));
+    return Results.Ok(ApiResult<ServiceInstance>.Ok(await operations.SaveAsync(instance, cancellationToken)));
 });
 
 app.MapGet("/api/v1/service-instances/{instanceId}", (string instanceId, IServiceInstanceStore store) =>
@@ -233,19 +240,16 @@ app.MapGet("/api/v1/service-instances/{instanceId}", (string instanceId, IServic
 
 app.MapPost("/api/v1/service-instances/{instanceId}/apply", async (
     string instanceId,
-    IServiceInstanceStore store,
-    IListenerHost listenerHost,
-    IRealtimeUpdateNotifier notifier,
+    ServiceInstanceOperations operations,
     CancellationToken cancellationToken) =>
 {
-    var instance = store.Get(instanceId);
-    if (instance is null)
+    var operation = await operations.ExecuteAsync(instanceId, ServiceInstanceAction.Apply, cancellationToken);
+    if (operation.Instance is null)
     {
         return Results.NotFound(ApiResult<object>.Fail("NOT_FOUND", $"Instance '{instanceId}' was not found."));
     }
 
-    var result = await listenerHost.ApplyAsync(instance, cancellationToken);
-    await notifier.PublishRuntimeAsync(listenerHost.GetStatuses(), cancellationToken);
+    var result = operation.ListenerResult!;
     return result.Succeeded
         ? Results.Ok(ApiResult<ListenerApplyResult>.Ok(result))
         : Results.Conflict(ApiResult<ListenerApplyResult>.Fail(result.Code, result.Message));
@@ -253,21 +257,16 @@ app.MapPost("/api/v1/service-instances/{instanceId}/apply", async (
 
 app.MapPost("/api/v1/service-instances/{instanceId}/start", async (
     string instanceId,
-    IServiceInstanceStore store,
-    IListenerHost listenerHost,
-    IRealtimeUpdateNotifier notifier,
+    ServiceInstanceOperations operations,
     CancellationToken cancellationToken) =>
 {
-    var instance = store.Get(instanceId);
-    if (instance is null)
+    var operation = await operations.ExecuteAsync(instanceId, ServiceInstanceAction.Start, cancellationToken);
+    if (operation.Instance is null)
     {
         return Results.NotFound(ApiResult<object>.Fail("NOT_FOUND", $"Instance '{instanceId}' was not found."));
     }
 
-    var result = await listenerHost.ApplyAsync(instance, cancellationToken);
-    store.SetDesiredState(instanceId, "Running");
-    store.SetRuntimeState(instanceId, result.Succeeded ? "Running" : "Failed", result.Succeeded ? null : result.Message);
-    await notifier.PublishRuntimeAsync(listenerHost.GetStatuses(), cancellationToken);
+    var result = operation.ListenerResult!;
     return result.Succeeded
         ? Results.Ok(ApiResult<ListenerApplyResult>.Ok(result))
         : Results.Conflict(ApiResult<ListenerApplyResult>.Fail(result.Code, result.Message));
@@ -275,36 +274,31 @@ app.MapPost("/api/v1/service-instances/{instanceId}/start", async (
 
 app.MapPost("/api/v1/service-instances/{instanceId}/stop", async (
     string instanceId,
-    IServiceInstanceStore store,
-    IListenerHost listenerHost,
-    IRealtimeUpdateNotifier notifier,
+    ServiceInstanceOperations operations,
     CancellationToken cancellationToken) =>
 {
-    if (store.Get(instanceId) is null)
+    var operation = await operations.ExecuteAsync(instanceId, ServiceInstanceAction.Stop, cancellationToken);
+    if (operation.Instance is null)
     {
         return Results.NotFound(ApiResult<object>.Fail("NOT_FOUND", $"Instance '{instanceId}' was not found."));
     }
 
-    await listenerHost.StopInstanceAsync(instanceId, cancellationToken);
-    store.SetDesiredState(instanceId, "Stopped");
-    store.SetRuntimeState(instanceId, "Stopped");
-    await notifier.PublishRuntimeAsync(listenerHost.GetStatuses(), cancellationToken);
     return Results.Ok(ApiResult<object>.Ok(new { instanceId, state = "Stopped" }));
 });
 
-app.MapPost("/api/v1/service-instances/{instanceId}/restart-policy", (
+app.MapPost("/api/v1/service-instances/{instanceId}/restart-policy", async (
     string instanceId,
     RestartPolicyRequest request,
-    IServiceInstanceStore store) =>
+    ServiceInstanceOperations operations,
+    CancellationToken cancellationToken) =>
 {
-    var instance = store.Get(instanceId);
-    if (instance is null)
+    var operation = await operations.ExecuteAsync(instanceId, ServiceInstanceAction.SetRestartPolicy, cancellationToken, request.AutoStart);
+    if (operation.Instance is null)
     {
         return Results.NotFound(ApiResult<object>.Fail("NOT_FOUND", $"Instance '{instanceId}' was not found."));
     }
 
-    var updated = store.SetDesiredState(instanceId, instance.DesiredState, request.AutoStart);
-    return Results.Ok(ApiResult<ServiceInstance>.Ok(updated!));
+    return Results.Ok(ApiResult<ServiceInstance>.Ok(operation.Instance));
 });
 
 app.MapGet("/api/v1/listeners", (IListenerHost listenerHost) =>
@@ -342,77 +336,15 @@ app.MapGet("/api/v1/metrics/summary", (IInteractionEventStore events, IThreatPro
 });
 
 app.MapGet("/api/v1/metrics/overview", (
-    IInteractionEventStore events,
-    IThreatProfileStore threats,
-    IListenerHost listenerHost,
-    IServiceInstanceStore instances) =>
-{
-    var now = DateTimeOffset.UtcNow;
-    // 总览和导出默认以 Asia/Shanghai 展示，今日统计按同一自然日计算。
-    var shanghaiOffset = TimeSpan.FromHours(8);
-    var dayStart = new DateTimeOffset(now.ToOffset(shanghaiOffset).Date, shanghaiOffset);
-    var nextDayStart = dayStart.AddDays(1);
-    var allEvents = events.GetAll();
-    var authenticationFailures = allEvents.Where(OverviewActivityProjection.IsAuthenticationFailure);
-    var listeners = listenerHost.GetStatuses();
-    var instanceById = instances.GetAll()
-        .ToDictionary(item => item.InstanceId, StringComparer.OrdinalIgnoreCase);
-    var (eventBuckets, adapterActivity, activityByHour) = OverviewActivityProjection.Build(allEvents, now);
-
-    var listenerOverview = listeners
-        .Select(listener => new ListenerOverview(
-            listener.ListenerId,
-            listener.InstanceId,
-            instanceById.TryGetValue(listener.InstanceId, out var instance) ? instance.AdapterKey : string.Empty,
-            listener.Port,
-            listener.State,
-            listener.ActiveConnections,
-            listener.AcceptedCount,
-            listener.ErrorCount))
-        .ToArray();
-
-    var metrics = new OverviewMetrics
-    {
-        GeneratedAtUtc = now,
-        EventCount = allEvents.Count,
-        AcceptedConnections = allEvents.Count(item => item.EventType.Equals("ConnectionAccepted", StringComparison.OrdinalIgnoreCase)),
-        AuthenticationAttempts = allEvents.Count(item => item.EventType.Equals("AuthenticationAttempted", StringComparison.OrdinalIgnoreCase)),
-        AuthenticationFailures = authenticationFailures.Count(),
-        TodayAuthenticationFailures = authenticationFailures.Count(item => item.OccurredAtUtc >= dayStart && item.OccurredAtUtc < nextDayStart),
-        ProtocolViolations = allEvents.Count(item => item.EventType.Equals("ProtocolViolation", StringComparison.OrdinalIgnoreCase)),
-        SessionClosed = allEvents.Count(item => item.EventType.Equals("SessionClosed", StringComparison.OrdinalIgnoreCase)),
-        ThreatIpCount = threats.GetAll().Count,
-        ServiceInstanceCount = instances.GetAll().Count,
-        ListenerCount = listeners.Count,
-        RunningListenerCount = listeners.Count(item => item.State.Equals("Running", StringComparison.OrdinalIgnoreCase)),
-        FailedListenerCount = listeners.Count(item => item.State.Equals("Failed", StringComparison.OrdinalIgnoreCase)),
-        ActiveConnections = listeners.Sum(item => item.ActiveConnections),
-        AcceptedCount = listeners.Sum(item => item.AcceptedCount),
-        ListenerErrorCount = listeners.Sum(item => item.ErrorCount),
-        EventsByAdapter = allEvents
-            .GroupBy(item => string.IsNullOrWhiteSpace(item.AdapterKey) ? "unknown" : item.AdapterKey, StringComparer.OrdinalIgnoreCase)
-            .Select(group => new MetricBucket(group.Key, group.LongCount()))
-            .OrderByDescending(item => item.Count)
-            .ToArray(),
-        EventsByOutcome = allEvents
-            .GroupBy(item => string.IsNullOrWhiteSpace(item.Outcome) ? "unknown" : item.Outcome, StringComparer.OrdinalIgnoreCase)
-            .Select(group => new MetricBucket(group.Key, group.LongCount()))
-            .OrderByDescending(item => item.Count)
-            .ToArray(),
-        EventsByHour = eventBuckets,
-        AdapterActivity = adapterActivity,
-        ActivityByHour = activityByHour,
-        Listeners = listenerOverview,
-        Host = HostOverviewReader.Read(now),
-    };
-
-    return Results.Ok(ApiResult<OverviewMetrics>.Ok(metrics));
-});
+    IInteractionEventStore events, IThreatProfileStore threats, IListenerHost listenerHost, IServiceInstanceStore instances) =>
+    Results.Ok(ApiResult<OverviewMetrics>.Ok(OverviewMetricsReader.Read(events, threats, listenerHost, instances, DateTimeOffset.UtcNow, includeHost: true))));
 
 app.MapHub<HoneypotHub>("/hubs/honeypot");
 app.MapIPLocationEndpoints();
 app.MapNotificationEndpoints();
 app.MapSyslogEndpoints();
+app.MapMcpManagementEndpoints();
+app.MapHoneypotMcpTransport();
 
 app.MapFallbackToFile("index.html");
 

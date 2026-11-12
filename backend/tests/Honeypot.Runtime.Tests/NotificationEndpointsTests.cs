@@ -152,6 +152,7 @@ public sealed class NotificationEndpointsTests
             return Task.FromResult(new NotificationTaskResult(["mail1"], "已排队"));
         }
         public Task<NotificationTaskResult> QueueReportAsync(ReportSendRequest request, string requestedBy, CancellationToken cancellationToken = default) => Task.FromResult(new NotificationTaskResult(["mail1"], "已排队"));
+        public Task<NotificationTaskResult> QueueDefaultReportAsync(ReportQuery query, string mcpKeyId, Guid requestId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task<NotificationTaskResult> RetryAsync(string id, string requestedBy, CancellationToken cancellationToken = default) => Task.FromResult(new NotificationTaskResult([id], "已排队"));
         public Task<NotificationPage<EmailDeliverySummary>> GetDeliveriesAsync(EmailDeliveryQuery query, CancellationToken cancellationToken = default) => Task.FromResult(new NotificationPage<EmailDeliverySummary>([], 0, query.Page, query.PageSize));
         public Task<EmailDeliveryDetails?> GetDeliveryAsync(string id, CancellationToken cancellationToken = default) => Task.FromResult<EmailDeliveryDetails?>(null);

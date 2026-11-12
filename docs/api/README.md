@@ -39,6 +39,7 @@
 - `POST /api/v1/credential-evidence/export`：供管理员批量读取证据原文，管理台据此生成详细 Excel。
 - `POST /hubs/honeypot/negotiate`：SignalR 实时通道协商，必须携带当前登录 Bearer 会话；WebSocket 连接使用同一 token 的 `access_token`。
 - 报告统计、通知设置、邮件任务和报告历史接口见下文“报告邮件通知”。
+- MCP 管理接口及智能体接入见下文“MCP 服务”。
 
 ## 威胁事件查询
 
@@ -140,3 +141,19 @@ GET /api/v1/reports?period=custom&startAtUtc=2026-11-08T16:00:00Z&endAtUtc=2026-
 邮件状态为 `Pending/Sending/Accepted/Retrying/Failed/Unknown`。`Accepted` 仅表示 SMTP 已受理；`Unknown` 表示提交或结果落库阶段不确定，停止自动重试，人工重试可能重复投递。报告中的邮件健康统计指本区间内创建的任务在报告生成时的状态，不是已到达或已读统计。
 
 六表迁移、模板位置、凭据保护、验证命令与未部署边界见[报告邮件通知实施方案](../spec/报告邮件通知实施方案.md)。
+
+## MCP 服务
+
+管理接口统一在 `/api/v1/mcp` 下，只接受管理员登录会话，响应使用 `ApiResult<T>` 和 `Cache-Control: no-store`。
+
+| 方法与路径（相对 `/api/v1/mcp`） | 合同 |
+| --- | --- |
+| `GET /settings`、`PUT /settings` | 读取设置及审计状态。PUT 接收 `enabled` 或 `auditRetentionDays`，省略字段保持现值；留存默认 30 天，可设 1–365 天。 |
+| `GET /permissions` | 返回业务分组、权限叶子和可选择的现有实例。 |
+| `GET /keys`、`POST /keys` | 分页或创建。创建接收 `name / access / permissionIds / instanceIds / expiresAtUtc`，有效期省略为永久；HTTP 201 的 `data` 返回 `key` 和一次性 `secret`。 |
+| `POST /keys/{id}/revoke`、`DELETE /keys/{id}` | 吊销、删除。未吊销时删除返回 HTTP 409；删除不影响历史审计。 |
+| `GET /audits`、`GET /audits/{id}` | 查询审计摘要或详情。列表支持 `page / pageSize / keyId / tool / sourceIp / result / fromUtc / toUtc`，时间范围为 `[fromUtc,toUtc)`。 |
+
+远程客户端连接 `/mcp`，选择 Streamable HTTP，设置 `Authorization: Bearer <API_KEY>`。该端点使用标准 MCP JSON-RPC；`tools/list` 只返回此 Key 可用的工具，`tools/call` 独立复核权限。工具执行失败可能返回 HTTP 200，客户端应检查 MCP `isError`。Key 不能访问管理 REST，登录会话也不能用于 MCP。
+
+不支持通过 URL 传递 Key。请求上限 32 KiB，工具结构化结果上限 72 KiB，审计响应捕获上限 256 KiB。异常报文、超限内容以及凭据字段的处理方式见 [MCP 服务实施方案](../spec/MCP%20服务实施方案.md)。
