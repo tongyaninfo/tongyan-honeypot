@@ -2,6 +2,16 @@ import base from '../zh-CN/events';
 
 export default {
   ...base,
+  'passwordBook.account': '帳號',
+  'passwordBook.service': '服務',
+  'passwordBook.authCount': '驗證次數',
+  'passwordBook.lastUsed': '最近一次使用時間',
+  'passwordBook.loadingPassword': '讀取中…',
+  'passwordBook.emptyPassword': '（空密碼）',
+  'passwordBook.unavailablePassword': '證據無法讀取或已過期',
+  'passwordBook.empty': '目前沒有密碼記錄',
+  'passwordBook.unavailable': '密碼簿暫時無法使用',
+  'passwordBook.adminOnly': '只有管理員可以存取密碼簿。',
   'events.type.AuthorizationDenied': '存取被拒絕',
   'credentials.password': '密碼',
   'credentials.passwordNotCaptured': '未擷取明文密碼',

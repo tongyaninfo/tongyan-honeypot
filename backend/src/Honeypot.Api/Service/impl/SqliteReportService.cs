@@ -1,9 +1,13 @@
 using System.Linq.Expressions;
+using Honeypot.Api.Common;
 using Honeypot.Api.Data;
 using Honeypot.Api.Data.Models;
+using Honeypot.Api.Models;
+using Honeypot.Api.Options;
 using Honeypot.Shared.Models;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 
 namespace Honeypot.Api.Service.impl;
 
@@ -11,7 +15,8 @@ namespace Honeypot.Api.Service.impl;
 public sealed class SqliteReportService(
     IDbContextFactory<HoneypotDbContext> factory,
     TimeProvider time,
-    IIPLocationResolver? locationResolver = null) : IReportService
+    IIPLocationResolver? locationResolver = null,
+    IOptions<EventStorageOptions>? storageOptions = null) : IReportService
 {
     private const long HourMs = 3_600_000;
     private const long DayMs = 24 * HourMs;
@@ -22,18 +27,20 @@ public sealed class SqliteReportService(
         var (period, previousStart, previousEnd) = ResolvePeriod(query, now);
         var start = period.StartAtUtc.ToUnixTimeMilliseconds();
         var end = period.EndAtUtc.ToUnixTimeMilliseconds();
+        var retentionCutoff = RetentionCutoff(now);
+        var retainedStart = Math.Max(start, retentionCutoff);
         await using var db = await factory.CreateDbContextAsync(cancellationToken);
         await db.Database.OpenConnectionAsync(cancellationToken);
         // 只读延迟事务让本次所有聚合看到同一个数据库快照，避免接收新事件时卡片与排行不一致。
         await using var transaction = ((SqliteConnection)db.Database.GetDbConnection()).BeginTransaction(deferred: true);
         await db.Database.UseTransactionAsync(transaction, cancellationToken);
-        var facts = Facts(db, start, end);
-        var coverage = await CoverageAsync(db, start, end, cancellationToken);
-        var totals = await TotalsAsync(db, start, end, cancellationToken);
+        var facts = Facts(db, retainedStart, end);
+        var coverage = await CoverageAsync(db, start, end, retentionCutoff, cancellationToken);
+        var totals = await TotalsAsync(db, retainedStart, end, cancellationToken);
         var oldStart = previousStart.ToUnixTimeMilliseconds();
         var oldEnd = previousEnd.ToUnixTimeMilliseconds();
-        var oldCoverage = await CoverageAsync(db, oldStart, oldEnd, cancellationToken);
-        var oldTotals = await TotalsAsync(db, oldStart, oldEnd, cancellationToken);
+        var oldCoverage = await CoverageAsync(db, oldStart, oldEnd, retentionCutoff, cancellationToken);
+        var oldTotals = await TotalsAsync(db, Math.Max(oldStart, retentionCutoff), oldEnd, cancellationToken);
         // 同进度比较还必须保证区间等长，短月被截断时不能把时间长度差解释为活动变化。
         var equalDuration = end - start == oldEnd - oldStart;
         var comparable = equalDuration && coverage.Status == "complete" && oldCoverage.Status == "complete";
@@ -51,18 +58,19 @@ public sealed class SqliteReportService(
             item => item.AuthenticationMethod == "" ? "unknown" : item.AuthenticationMethod, 10, cancellationToken);
         var risks = await BreakdownAsync(facts, item => item.RiskSignal, 10, cancellationToken);
         var evidence = await BreakdownAsync(facts.Where(item => item.CredentialArtifactId != null), item => item.EvidenceKind, 10, cancellationToken);
-        var trend = await TrendAsync(db, facts, start, end, period.Granularity == "hour" ? HourMs : DayMs, cancellationToken);
-        var runtime = await RuntimeAsync(db, start, end, cancellationToken);
+        var trend = await TrendAsync(db, facts, start, end, retentionCutoff, period.Granularity == "hour" ? HourMs : DayMs, cancellationToken);
+        var runtime = await RuntimeAsync(db, retainedStart, end, cancellationToken);
         var notes = new List<string>
         {
             "连接仅统计 TCP 已接受连接；同一连接的握手、认证和关闭事件不会重复计为连接。",
-            "新来源指报告采集启用后首次记录的 IP，不代表互联网中的首次活动。",
+            "新来源依据当前报告库的首次观测记录统计。超过留存期且无观测的 IP 再次出现时重新计为新来源。",
             "风险分组只表示事件自身 RiskDelta 增量，不代表历史威胁档案评分或实际封禁。",
             "趋势中的数值为已记录事件数；未覆盖的时段不能据此认定没有活动。",
             "CPU 为蜜罐进程占全部逻辑处理器算力百分比；内存为进程工作集；监听状态为采样正常比例。",
             "地区按报告生成时的 IP 解析缓存分组，不是事件发生时的历史归属地；未知、未启用或待解析会单列。"
         };
         if (coverage.Status != "complete") notes.Add("当前区间采集覆盖不完整，统计仅代表已记录数据；缺失时段不视为零事件，环比不计算。");
+        if (start < retentionCutoff) notes.Add("查询区间部分或全部早于报告数据留存起点，超出留存的时段按缺失显示。");
         if (oldCoverage.Status != "complete") notes.Add("上期采集覆盖不完整，无法给出可靠环比。");
         if (!equalDuration) notes.Add("当前周期与上期时长不同（例如月长不足），保留两期实际统计，但不计算同进度变化率。");
         return new(now, period, coverage, totals, comparison, trend, protocols, ports, sourceRows.Take(10).ToArray(),
@@ -71,6 +79,33 @@ public sealed class SqliteReportService(
             Regions = BuildRegions(sourceRows, invalidSources.FirstOrDefault(), totals),
         };
     }
+
+    public async Task<IReadOnlyCollection<HourlyActivityMetric>> ReadOverviewActivityAsync(DateTimeOffset now,
+        CancellationToken cancellationToken = default)
+    {
+        var (firstHour, nextHour) = OverviewActivityProjection.HourWindow(now);
+        var start = firstHour.ToUnixTimeMilliseconds();
+        var end = now.ToUnixTimeMilliseconds();
+        var retentionCutoff = RetentionCutoff(now);
+        await using var db = await factory.CreateDbContextAsync(cancellationToken);
+        await db.Database.OpenConnectionAsync(cancellationToken);
+        await using var transaction = ((SqliteConnection)db.Database.GetDbConnection()).BeginTransaction(deferred: true);
+        await db.Database.UseTransactionAsync(transaction, cancellationToken);
+
+        // 使用已有报表事实，兼容只有报表记录的旧数据，也不受近期明细分页上限影响。
+        var facts = Facts(db, Math.Max(start, retentionCutoff), end);
+        var trend = await TrendAsync(db, facts, start, end, retentionCutoff, HourMs, cancellationToken);
+        var hours = trend.Select(point => new HourlyActivityMetric(OverviewActivityProjection.FormatHour(point.StartAtUtc),
+            point.Connections, point.AuthenticationFailures) { CoverageStatus = point.CoverageStatus }).ToList();
+        // 整点查询时，当前小时尚无覆盖，仍保留第 24 个时间点。
+        var currentHour = nextHour.AddHours(-1);
+        if (end == currentHour.ToUnixTimeMilliseconds())
+            hours.Add(new(OverviewActivityProjection.FormatHour(currentHour), null, null) { CoverageStatus = "unknown" });
+        return hours;
+    }
+
+    private long RetentionCutoff(DateTimeOffset now) =>
+        now.AddDays(-(storageOptions?.Value.ReportRetentionDays ?? new EventStorageOptions().ReportRetentionDays)).ToUnixTimeMilliseconds();
 
     public static (ReportPeriod Period, DateTimeOffset PreviousStart, DateTimeOffset PreviousEnd) ResolvePeriod(ReportQuery query, DateTimeOffset now)
     {
@@ -141,15 +176,16 @@ public sealed class SqliteReportService(
             aggregate?.Violations ?? 0, artifacts, aggregate?.Truncated ?? 0, aggregate?.Closed ?? 0);
     }
 
-    private static async Task<ReportCoverage> CoverageAsync(HoneypotDbContext db, long start, long end, CancellationToken ct)
+    private static async Task<ReportCoverage> CoverageAsync(HoneypotDbContext db, long start, long end, long retentionCutoff, CancellationToken ct)
     {
+        var retainedStart = Math.Max(start, retentionCutoff);
         // 对区间求并集；时钟回拨或重复/重叠采样不能填平真正缺失的采集时段。
         var coverageRows = await db.Database.SqlQuery<long>($"""
             WITH spans AS (
-                SELECT MAX("CoverageStartAtUnixMs", {start}) AS s, MIN("CapturedAtUnixMs", {end}) AS e
+                SELECT MAX("CoverageStartAtUnixMs", {retainedStart}) AS s, MIN("CapturedAtUnixMs", {end}) AS e
                 FROM report_runtime_samples
                 WHERE "CapturedAtUnixMs" > {start} AND "CoverageStartAtUnixMs" < {end}
-                  AND "CapturedAtUnixMs" > "CoverageStartAtUnixMs" AND "PersistenceFailures" = 0
+                  AND "CapturedAtUnixMs" > {retainedStart} AND "CapturedAtUnixMs" > "CoverageStartAtUnixMs" AND "PersistenceFailures" = 0
             ), ordered AS (
                 SELECT s, e, MAX(e) OVER (ORDER BY s, e ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS previousEnd
                 FROM spans
@@ -164,7 +200,7 @@ public sealed class SqliteReportService(
         var duration = Math.Max(0, end - start);
         coveredMs = Math.Clamp(coveredMs, 0, duration);
         var unknown = duration - coveredMs;
-        var hasEvents = await Facts(db, start, end).AnyAsync(ct);
+        var hasEvents = await Facts(db, retainedStart, end).AnyAsync(ct);
         return new(coveredMs == 0 ? "unknown" : unknown == 0 && failures == 0 ? "complete" : "partial",
             coveredMs / 1000d, unknown / 1000d, duration > 0 ? Math.Round(100d * coveredMs / duration, 2) : 0,
             At(first), At(last), failures, hasEvents);
@@ -181,8 +217,9 @@ public sealed class SqliteReportService(
             .Select(item => new ReportBreakdown(item.Key, item.Events, item.Connections, item.AuthenticationFailures, item.SourceIps)).ToListAsync(ct);
 
     private static async Task<IReadOnlyList<ReportTrendPoint>> TrendAsync(HoneypotDbContext db, IQueryable<ReportEventEntity> facts,
-        long start, long end, long width, CancellationToken ct)
+        long start, long end, long retentionCutoff, long width, CancellationToken ct)
     {
+        var retainedStart = Math.Max(start, retentionCutoff);
         var values = await facts.GroupBy(item => (item.OccurredAtUnixMs - start) / width).Select(group => new
         {
             Index = group.Key, Events = group.LongCount(), Connections = group.LongCount(item => item.EventType == "connectionaccepted"),
@@ -191,10 +228,10 @@ public sealed class SqliteReportService(
         // 按趋势桶拆分后分别取区间并集；正常心跳最多拆两段，补充样本跨更多桶也能正确处理。
         var coverages = await db.Database.SqlQuery<TrendCoverageBucket>($"""
             WITH RECURSIVE spans AS (
-                SELECT MAX("CoverageStartAtUnixMs", {start}) AS s, MIN("CapturedAtUnixMs", {end}) AS e
+                SELECT MAX("CoverageStartAtUnixMs", {retainedStart}) AS s, MIN("CapturedAtUnixMs", {end}) AS e
                 FROM report_runtime_samples
                 WHERE "CapturedAtUnixMs" > {start} AND "CoverageStartAtUnixMs" < {end}
-                  AND "CapturedAtUnixMs" > "CoverageStartAtUnixMs" AND "PersistenceFailures" = 0
+                  AND "CapturedAtUnixMs" > {retainedStart} AND "CapturedAtUnixMs" > "CoverageStartAtUnixMs" AND "PersistenceFailures" = 0
             ), parts(Bucket, s, e, endAt) AS (
                 SELECT ((s - {start}) / {width}) AS Bucket,
                        s, MIN(e, {start} + (((s - {start}) / {width}) + 1) * {width}), e

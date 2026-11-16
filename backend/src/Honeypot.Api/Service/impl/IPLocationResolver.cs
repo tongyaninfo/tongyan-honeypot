@@ -8,6 +8,8 @@ namespace Honeypot.Api.Service.impl;
 /// <summary>有界后台解析协调器。短锁仅保护内存，业务请求不等待外部 I/O。</summary>
 public sealed class IPLocationResolver : IIPLocationResolver, IDisposable
 {
+    private const int MapQueueWriteLimit = 128;
+
     private sealed record WorkItem(string Ip, long Generation, IPLocationSettings Settings, CancellationToken Token);
     private sealed record CacheEntry(IPLocationResult Result, DateTimeOffset ExpiresAt, LinkedListNode<string> Node);
     private readonly object _sync = new();
@@ -46,11 +48,17 @@ public sealed class IPLocationResolver : IIPLocationResolver, IDisposable
         store.Changed += ChangeSettings;
     }
 
-    public IPLocationBatchResult Resolve(IReadOnlyList<string> ips)
+    public IPLocationBatchResult Resolve(IReadOnlyList<string> ips) => Resolve(ips, queueWriteLimit: null);
+
+    public IPLocationBatchResult ResolveForMap(IReadOnlyList<string> ips) => Resolve(ips, MapQueueWriteLimit);
+
+    private IPLocationBatchResult Resolve(IReadOnlyList<string> ips, int? queueWriteLimit)
     {
         lock (_sync)
         {
             var items = new List<IPLocationResult>(ips.Count);
+            var now = _time.GetUtcNow();
+            var remainingWrites = queueWriteLimit ?? int.MaxValue;
             foreach (var input in ips.Distinct(StringComparer.Ordinal))
             {
                 var local = IPLocationAddress.Classify(input, out var ip);
@@ -58,7 +66,7 @@ public sealed class IPLocationResolver : IIPLocationResolver, IDisposable
                 if (!_settings.Enabled) { items.Add(new(input, "disabled", "IP 解析未开启")); continue; }
                 if (_cache.TryGetValue(ip, out var cached))
                 {
-                    if (cached.ExpiresAt > _time.GetUtcNow())
+                    if (cached.ExpiresAt > now)
                     {
                         _cacheOrder.Remove(cached.Node);
                         _cacheOrder.AddLast(cached.Node);
@@ -69,24 +77,30 @@ public sealed class IPLocationResolver : IIPLocationResolver, IDisposable
                     _cacheOrder.Remove(cached.Node);
                 }
                 if (_pending.Contains(ip)) { items.Add(new(input, "pending", "归属地解析中")); continue; }
-                var work = new WorkItem(ip, _generation, _settings, _generationCancellation.Token);
-                if (_queue.Writer.TryWrite(work))
+                if (remainingWrites > 0 && _queue.Writer.TryWrite(new(ip, _generation, _settings, _generationCancellation.Token)))
                 {
+                    remainingWrites--;
                     _pending.Add(ip);
                     items.Add(new(input, "pending", "归属地解析中"));
+                    continue;
                 }
-                else
+
+                if (queueWriteLimit is not null)
                 {
-                    items.Add(new(input, "busy", "解析队列繁忙"));
-                    _busyRequests++;
-                    var now = _time.GetUtcNow();
-                    if (now >= _nextBusyReport)
-                    {
-                        _logs?.Publish("honeypot-iplocation", "IP_LOCATION_QUEUE_BUSY", SyslogSeverity.Warning,
-                            new Dictionary<string, object?> { ["count"] = _busyRequests });
-                        _busyRequests = 0;
-                        _nextBusyReport = now.AddMinutes(1);
-                    }
+                    // 达到地图写入上限或队列已满后仍检查剩余输入的缓存与排队状态。
+                    remainingWrites = 0;
+                    items.Add(new(input, "deferred", "归属地等待后续解析"));
+                    continue;
+                }
+
+                items.Add(new(input, "busy", "解析队列繁忙"));
+                _busyRequests++;
+                if (now >= _nextBusyReport)
+                {
+                    _logs?.Publish("honeypot-iplocation", "IP_LOCATION_QUEUE_BUSY", SyslogSeverity.Warning,
+                        new Dictionary<string, object?> { ["count"] = _busyRequests });
+                    _busyRequests = 0;
+                    _nextBusyReport = now.AddMinutes(1);
                 }
             }
             return new(_settings.Enabled, items);

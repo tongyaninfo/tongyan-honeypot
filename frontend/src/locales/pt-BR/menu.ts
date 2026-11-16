@@ -1,4 +1,5 @@
 export default {
+  'menu.passwordBook': 'Registro de senhas',
   'menu.welcome': 'Welcome',
   'menu.more-blocks': 'More Blocks',
   'menu.home': 'Início',

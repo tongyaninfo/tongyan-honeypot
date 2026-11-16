@@ -114,6 +114,14 @@ public sealed class InteractionActivityTests
             Assert.Equal(0, wrongPort.RootElement.GetProperty("data").GetProperty("total").GetInt32());
             using var raw = JsonDocument.Parse(await client.GetStringAsync("/api/v1/events"));
             Assert.Equal(8, raw.RootElement.GetProperty("data").GetProperty("total").GetInt32());
+            using var page = JsonDocument.Parse(await client.GetStringAsync("/api/v1/events?page=2&pageSize=3&connectionIds=conn"));
+            var pageData = page.RootElement.GetProperty("data");
+            Assert.Equal(8, pageData.GetProperty("total").GetInt32());
+            Assert.Equal(3, pageData.GetProperty("items").GetArrayLength());
+            Assert.Equal(5, pageData.GetProperty("items")[0].GetProperty("sequence").GetInt64());
+            using var pastEnd = JsonDocument.Parse(await client.GetStringAsync("/api/v1/events?page=2147483647&pageSize=999"));
+            Assert.Equal(0, pastEnd.RootElement.GetProperty("data").GetProperty("items").GetArrayLength());
+            Assert.Equal(100, pastEnd.RootElement.GetProperty("data").GetProperty("pageSize").GetInt32());
             var details = await client.GetStringAsync("/api/v1/connections/conn/events");
             using var connection = JsonDocument.Parse(details);
             Assert.Equal(8, connection.RootElement.GetProperty("data").GetArrayLength());

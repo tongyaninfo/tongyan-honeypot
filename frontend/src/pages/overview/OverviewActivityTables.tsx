@@ -1,9 +1,17 @@
 import { Link } from '@umijs/max';
-import { Card, Table, Tag, Typography } from 'antd';
+import { Button, Card, Modal, Table, Tag, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import SourceIp from '@/components/SourceIp';
-import type { AdapterActivity, ThreatIpProfile } from '@/services/honeypot/api';
+import type {
+  AdapterActivity,
+  OverviewAdapterActivityFilter,
+  OverviewAdapterActivityMetric,
+  ThreatIpProfile,
+} from '@/services/honeypot/api';
+import { OverviewConnectionsDetails } from './OverviewConnectionsPopover';
+
+export const RISK_SOURCE_LIMIT = 8;
 
 const numberFormat = new Intl.NumberFormat('zh-CN');
 const timeFormat = new Intl.DateTimeFormat('zh-CN', {
@@ -25,50 +33,71 @@ function renderTime(value: string) {
   return <time dateTime={value}>{timeFormat.format(timestamp)}</time>;
 }
 
-const adapterColumns: ColumnsType<AdapterActivity> = [
-  {
-    title: '协议',
-    dataIndex: 'adapterKey',
-    width: 60,
-    ellipsis: true,
-    render: (value: string) =>
-      value === 'unknown' ? '未知' : value.toUpperCase(),
-  },
-  {
-    title: '连接',
-    dataIndex: 'acceptedConnections',
-    width: 52,
+const metricLabels: Record<OverviewAdapterActivityMetric, string> = {
+  acceptedConnections: '连接',
+  authenticationFailures: '认证失败',
+  sourceIpCount: '来源 IP',
+  protocolViolations: '协议异常',
+};
+
+function adapterName(adapter: string) {
+  return adapter === 'unknown' ? '未知' : adapter.toUpperCase();
+}
+
+function activityDetailTitle(adapter: string, metric: OverviewAdapterActivityMetric) {
+  const detail = metric === 'sourceIpCount' ? '来源 IP 明细' : `${metricLabels[metric]}明细`;
+  return `${adapterName(adapter)} ${detail}`;
+}
+
+function adapterColumns(
+  openDetails: (filter: OverviewAdapterActivityFilter) => void,
+): ColumnsType<AdapterActivity> {
+  const metricColumn = (
+    dataIndex: OverviewAdapterActivityMetric,
+    width: number,
+  ): ColumnsType<AdapterActivity>[number] => ({
+    title: dataIndex === 'sourceIpCount' ? '来源 IP 数' : metricLabels[dataIndex],
+    dataIndex,
+    width,
     align: 'right',
-    render: numberFormat.format,
-  },
-  {
-    title: '认证失败',
-    dataIndex: 'authenticationFailures',
-    width: 78,
-    align: 'right',
-    render: numberFormat.format,
-  },
-  {
-    title: '来源 IP 数',
-    dataIndex: 'sourceIpCount',
-    width: 80,
-    align: 'right',
-    render: numberFormat.format,
-  },
-  {
-    title: '协议异常',
-    dataIndex: 'protocolViolations',
-    width: 78,
-    align: 'right',
-    render: numberFormat.format,
-  },
-  {
-    title: '最近活动',
-    dataIndex: 'lastActivityAtUtc',
-    width: 100,
-    render: renderTime,
-  },
-];
+    render: (value: number, row) => {
+      const displayed = numberFormat.format(value);
+      return value > 0 ? (
+        <Button
+          size="small"
+          type="link"
+          style={{ paddingInline: 0 }}
+          aria-label={`${activityDetailTitle(row.adapterKey, dataIndex)}，${displayed}`}
+          aria-haspopup="dialog"
+          onClick={() =>
+            openDetails({ scope: 'adapterActivity', adapterKey: row.adapterKey, metric: dataIndex })
+          }
+        >
+          {displayed}
+        </Button>
+      ) : displayed;
+    },
+  });
+  return [
+    {
+      title: '协议',
+      dataIndex: 'adapterKey',
+      width: 60,
+      ellipsis: true,
+      render: adapterName,
+    },
+    metricColumn('acceptedConnections', 52),
+    metricColumn('authenticationFailures', 78),
+    metricColumn('sourceIpCount', 80),
+    metricColumn('protocolViolations', 78),
+    {
+      title: '最近活动',
+      dataIndex: 'lastActivityAtUtc',
+      width: 100,
+      render: renderTime,
+    },
+  ];
+}
 
 const riskColumns: ColumnsType<ThreatIpProfile> = [
   {
@@ -127,6 +156,8 @@ export function AdapterActivityCard({
   activity?: AdapterActivity[];
   loading: boolean;
 }) {
+  const [selected, setSelected] = useState<OverviewAdapterActivityFilter>();
+  const wide = selected?.metric === 'authenticationFailures' || selected?.metric === 'protocolViolations';
   return (
     <Card
       size="small"
@@ -140,13 +171,23 @@ export function AdapterActivityCard({
         size="small"
         loading={loading}
         dataSource={activity ?? []}
-        columns={adapterColumns}
+        columns={adapterColumns(setSelected)}
         pagination={false}
         scroll={{ x: 448 }}
         locale={{
           emptyText: activity ? '近 24 小时暂无协议活动' : '协议活动数据不可用',
         }}
       />
+      <Modal
+        open={!!selected}
+        title={selected ? activityDetailTitle(selected.adapterKey, selected.metric) : undefined}
+        onCancel={() => setSelected(undefined)}
+        footer={null}
+        destroyOnHidden
+        width={wide ? 860 : 700}
+      >
+        {selected && <OverviewConnectionsDetails filter={selected} />}
+      </Modal>
     </Card>
   );
 }
@@ -167,7 +208,7 @@ export function RiskSourcesCard({
             b.authenticationAttemptCount - a.authenticationAttemptCount ||
             Date.parse(b.lastSeenUtc) - Date.parse(a.lastSeenUtc),
         )
-        .slice(0, 5),
+        .slice(0, RISK_SOURCE_LIMIT),
     [threats],
   );
 

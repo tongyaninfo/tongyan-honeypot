@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Honeypot.Api.Common;
 using Honeypot.Api.Models;
 using Honeypot.Api.Service;
 using Honeypot.Shared.Models;
@@ -42,31 +43,31 @@ public sealed class SyslogRequestAuditMiddleware(RequestDelegate next)
             >= 400 => SyslogSeverity.Informational,
             _ => HttpMethods.IsGet(method) ? SyslogSeverity.Debug : SyslogSeverity.Informational
         };
-        switch (route, method)
+        switch (ManagementOperationCatalog.Find(route, method))
         {
-            case ("/api/v1/auth/login", "POST"):
+            case ManagementOperationCatalog.Login:
                 app = "honeypot-identity";
                 code = status < 400 ? "ADMIN_LOGIN_SUCCEEDED" : "ADMIN_LOGIN_REJECTED";
                 if (status < 400) severity = SyslogSeverity.Notice;
                 break;
-            case ("/api/v1/auth/logout", "POST"):
+            case ManagementOperationCatalog.Logout:
                 app = "honeypot-identity";
                 code = "ADMIN_LOGOUT";
                 if (status < 400 && userId is not null) severity = SyslogSeverity.Notice;
                 break;
-            case ("/api/v1/setup/initialize", "POST"):
+            case ManagementOperationCatalog.Initialize:
                 app = "honeypot-identity";
                 code = "ADMIN_INITIALIZATION";
                 if (status < 400) severity = SyslogSeverity.Notice;
                 break;
-            case ("/api/v1/settings/notifications" or "/api/v1/settings/ip-location", "PUT"):
+            case ManagementOperationCatalog.NotificationSettings or ManagementOperationCatalog.IpLocationSettings:
                 app = "honeypot-settings";
                 code = "SETTINGS_UPDATE";
                 if (status < 400) severity = SyslogSeverity.Notice;
                 break;
-            case ("/api/v1/service-instances" or "/api/v1/service-instances/{instanceId}/apply"
-                or "/api/v1/service-instances/{instanceId}/start" or "/api/v1/service-instances/{instanceId}/stop"
-                or "/api/v1/service-instances/{instanceId}/restart-policy", "POST"):
+            case ManagementOperationCatalog.InstanceSave or ManagementOperationCatalog.InstanceApply
+                or ManagementOperationCatalog.InstanceStart or ManagementOperationCatalog.InstanceStop
+                or ManagementOperationCatalog.RestartPolicy:
                 app = "honeypot-runtime";
                 code = "SERVICE_INSTANCE_OPERATION";
                 if (status < 400) severity = SyslogSeverity.Notice;

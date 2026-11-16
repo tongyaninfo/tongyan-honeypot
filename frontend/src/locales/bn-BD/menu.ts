@@ -1,4 +1,5 @@
 export default {
+  'menu.passwordBook': 'পাসওয়ার্ড তালিকা',
   'menu.welcome': 'স্বাগতম',
   'menu.more-blocks': 'আরও ব্লক',
   'menu.home': 'নীড়',

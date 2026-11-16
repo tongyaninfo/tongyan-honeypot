@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Formats.Asn1;
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Authentication;
 using System.Text;
 using System.Text.Json;
 using Honeypot.Protocol.Abstractions.Models;
@@ -29,6 +30,7 @@ public sealed class MsSqlAuthenticationTests
         Assert.Equal("catalog", authentication.Database);
         Assert.Equal("sql-password", authentication.AuthenticationMethod);
         Assert.Equal("18456", authentication.AuthenticationFailureCode);
+        Assert.Null(authentication.ProtocolErrorCode);
         Assert.Null(authentication.Password);
         var evidence = Assert.Single(sink.Evidence);
         Assert.Equal(authentication.EventId, evidence.EventId);
@@ -54,12 +56,12 @@ public sealed class MsSqlAuthenticationTests
     }
 
     [Theory]
-    [InlineData("wrong-type")]
-    [InlineData("bad-offset")]
-    [InlineData("bad-length")]
-    [InlineData("bad-packet-id")]
-    [InlineData("bad-prelogin")]
-    public async Task InvalidFramesCannotMasqueradeAsAuthentication(string invalid)
+    [InlineData("wrong-type", "login7", "TDS_LOGIN7_INVALID")]
+    [InlineData("bad-offset", "login7", "TDS_LOGIN7_INVALID")]
+    [InlineData("bad-length", "login7", "TDS_LOGIN7_INVALID")]
+    [InlineData("bad-packet-id", "login7", "TDS_LOGIN7_INVALID")]
+    [InlineData("bad-prelogin", "prelogin", "TDS_PRELOGIN_INVALID")]
+    public async Task InvalidFramesCannotMasqueradeAsAuthentication(string invalid, string stage, string errorCode)
     {
         var login = Login("sa", "wrong");
         var prelogin = PreLogin();
@@ -72,10 +74,37 @@ public sealed class MsSqlAuthenticationTests
         var session = new BufferedSession(frames);
         var sink = new EvidenceSink();
         await new MsSqlAdapter().HandleAsync(session, Context(), Profile(), sink);
-        Assert.Empty(sink.Evidence);
-        Assert.DoesNotContain(sink.Events, item => item.EventType == "AuthenticationAttempted");
-        Assert.Contains(sink.Events, item => item.EventType == "ProtocolViolation");
-        Assert.Equal(SessionCloseReason.ProtocolViolation, session.CloseReason);
+        AssertViolation(sink, session, stage, errorCode);
+    }
+
+    [Fact]
+    public async Task TlsFailurePublishesOnlyFixedProtocolDiagnostic()
+    {
+        var prelogin = PreLogin();
+        prelogin[^1] = 1;
+        // 用隔离会话模拟 TLS 传输失败，避免以外部握手作为诊断契约的前提。
+        var session = new BufferedSession(Packet(0x12, prelogin))
+        {
+            ReadFailure = new AuthenticationException("isolated TLS exception detail"),
+        };
+        var sink = new EvidenceSink();
+        await new MsSqlAdapter().HandleAsync(session, Context(), Profile(), sink);
+        Assert.Contains(sink.Events, item => item.EventType == "PreLoginResponseSent");
+        Assert.DoesNotContain(sink.Events, item => item.EventType == "TlsHandshakeCompleted");
+        AssertViolation(sink, session, "tls", "TDS_TLS_FAILED");
+    }
+
+    [Fact]
+    public async Task IntegratedAuthenticationReadFailurePublishesOnlyFixedProtocolDiagnostic()
+    {
+        var session = new BufferedSession(Packet(0x12, PreLogin()), Packet(0x10, Login("", "", NtlmNegotiate())))
+        {
+            ReadFailure = new InvalidDataException("isolated SSPI exception detail"),
+        };
+        var sink = new EvidenceSink();
+        await new MsSqlAdapter().HandleAsync(session, Context(), Profile(), sink);
+        Assert.Contains(sink.Events, item => item.EventType == "SspiChallengeSent");
+        AssertViolation(sink, session, "integrated-auth", "TDS_INTEGRATED_AUTH_INVALID");
     }
 
     [Theory]
@@ -83,10 +112,7 @@ public sealed class MsSqlAuthenticationTests
     [InlineData(true)]
     public async Task NtlmChallengeResponseCapturesIdentityAndTranscript(bool spnego)
     {
-        var type1 = new byte[32];
-        "NTLMSSP\0"u8.CopyTo(type1);
-        BinaryPrimitives.WriteUInt32LittleEndian(type1.AsSpan(8), 1);
-        BinaryPrimitives.WriteUInt32LittleEndian(type1.AsSpan(12), 0x00880201);
+        var type1 = NtlmNegotiate();
         var type3 = NtlmAuthenticate("EXAMPLE", "tester");
         if (spnego) { type1 = Spnego(type1, initial: true); type3 = Spnego(type3, initial: false); }
         var session = new BufferedSession(Packet(0x12, PreLogin()), Packet(0x10, Login("", "", type1)), Packet(0x11, type3));
@@ -95,6 +121,7 @@ public sealed class MsSqlAuthenticationTests
         Assert.Contains(sink.Events, item => item.EventType == "SspiChallengeSent");
         var auth = Assert.Single(sink.Events, item => item.EventType == "AuthenticationAttempted");
         Assert.Equal("ntlm", auth.AuthenticationMethod);
+        Assert.Null(auth.ProtocolErrorCode);
         Assert.Equal("tester", auth.Username);
         Assert.Equal("EXAMPLE", auth.Domain);
         var evidence = Assert.Single(sink.Evidence);
@@ -233,6 +260,14 @@ public sealed class MsSqlAuthenticationTests
         payload.CopyTo(frame, 8);
         return frame;
     }
+    private static byte[] NtlmNegotiate()
+    {
+        var token = new byte[32];
+        "NTLMSSP\0"u8.CopyTo(token);
+        BinaryPrimitives.WriteUInt32LittleEndian(token.AsSpan(8), 1);
+        BinaryPrimitives.WriteUInt32LittleEndian(token.AsSpan(12), 0x00880201);
+        return token;
+    }
     private static byte[] NtlmAuthenticate(string domain, string username)
     {
         var values = new[] { Array.Empty<byte>(), Enumerable.Repeat((byte)0x11, 24).ToArray(), Encoding.Unicode.GetBytes(domain), Encoding.Unicode.GetBytes(username), Encoding.Unicode.GetBytes("CLIENT"), Array.Empty<byte>() };
@@ -282,6 +317,20 @@ public sealed class MsSqlAuthenticationTests
         Assert.Equal(0xFD, response[done]);
         Assert.Equal(2, BinaryPrimitives.ReadUInt16LittleEndian(response.AsSpan(done + 1)));
     }
+    private static void AssertViolation(EvidenceSink sink, BufferedSession session, string stage, string errorCode)
+    {
+        var diagnostic = Assert.Single(sink.Events, item => item.EventType == "ProtocolViolation");
+        Assert.Equal(stage, diagnostic.Stage);
+        Assert.Equal(errorCode, diagnostic.ProtocolErrorCode);
+        Assert.Equal("failure", diagnostic.Outcome);
+        Assert.Equal("Invalid or unsupported TDS authentication exchange", diagnostic.PayloadSummary);
+        Assert.Null(diagnostic.CredentialArtifactId);
+        Assert.Empty(sink.Evidence);
+        Assert.DoesNotContain(sink.Events, item => item.EventType == "AuthenticationAttempted");
+        Assert.Equal(SessionCloseReason.ProtocolViolation, session.CloseReason);
+        if (session.ReadFailure is { } failure)
+            Assert.DoesNotContain(failure.Message, JsonSerializer.Serialize(diagnostic), StringComparison.Ordinal);
+    }
     private sealed class EvidenceSink : IInteractionEventSink, ICredentialEvidenceSink
     {
         public List<InteractionEvent> Events { get; } = [];
@@ -301,12 +350,16 @@ public sealed class MsSqlAuthenticationTests
         private readonly MemoryStream _input = new(frames.SelectMany(item => item).ToArray());
         public List<byte[]> Writes { get; } = [];
         public SessionCloseReason? CloseReason { get; private set; }
+        public Exception? ReadFailure { get; init; }
         public string ConnectionId => "test-connection";
         public EndPoint RemoteEndPoint => new IPEndPoint(IPAddress.Loopback, 50001);
         public EndPoint LocalEndPoint => new IPEndPoint(IPAddress.Loopback, 50002);
         public string Transport => "tcp";
         public bool IsClosed => CloseReason.HasValue;
-        public ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct) => _input.ReadAsync(buffer[..Math.Min(buffer.Length, 3)], ct);
+        public ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct) =>
+            ReadFailure is { } failure && _input.Position == _input.Length
+                ? ValueTask.FromException<int>(failure)
+                : _input.ReadAsync(buffer[..Math.Min(buffer.Length, 3)], ct);
         public ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken ct) { Writes.Add(buffer.ToArray()); return ValueTask.CompletedTask; }
         public ValueTask CloseAsync(SessionCloseReason reason, CancellationToken ct = default) { CloseReason = reason; return ValueTask.CompletedTask; }
         public ValueTask DisposeAsync() => _input.DisposeAsync();

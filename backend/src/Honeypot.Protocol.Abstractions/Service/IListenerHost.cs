@@ -6,6 +6,8 @@ public interface IListenerHost : IAsyncDisposable
 {
     IReadOnlyCollection<ListenerRuntimeStatus> GetStatuses();
 
+    IReadOnlyCollection<ActiveConnectionSnapshot> GetActiveConnections() => [];
+
     Task<ListenerApplyResult> ApplyAsync(ServiceInstance instance, CancellationToken cancellationToken = default);
 
     Task StopInstanceAsync(string instanceId, CancellationToken cancellationToken = default);

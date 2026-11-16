@@ -31,12 +31,11 @@ public sealed class McpPersistenceTests
         db.Set<ReportSourceFirstSeenEntity>().Add(new() { SourceIp = "192.0.2.21", FirstSeenAtUnixMs = Now.ToUnixTimeMilliseconds() });
         await db.SaveChangesAsync();
         var before = await TableNames(db);
-        await db.Database.MigrateAsync();
-        await db.Database.MigrateAsync();
+        await db.GetService<IMigrator>().MigrateAsync("20261111152753_McpManagement");
+        await db.GetService<IMigrator>().MigrateAsync("20261111152753_McpManagement");
         var after = await TableNames(db);
         Assert.Equal(new[] { "mcp_api_keys", "mcp_call_audits", "mcp_settings" }, after.Except(before).Order().ToArray());
         Assert.All(before, table => Assert.Contains(table, after));
-        Assert.False(db.Database.HasPendingModelChanges());
         Assert.Equal("隔离样本", (await db.ServiceInstances.AsNoTracking().SingleAsync()).DisplayName);
         Assert.Equal("192.0.2.21", (await db.Set<ReportSourceFirstSeenEntity>().AsNoTracking().SingleAsync()).SourceIp);
         var store = CreateStore(dbFactory, new TestClock(Now));

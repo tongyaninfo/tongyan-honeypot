@@ -62,19 +62,30 @@ public sealed class TongYanIPLocation(HttpClient client) : IIPLocation, IDisposa
             if (status.Equals("notFound", StringComparison.OrdinalIgnoreCase)) return new(ip, "resolved", "未查询到归属地");
             if (!status.Equals("success", StringComparison.OrdinalIgnoreCase)) return Failed(ip);
             if (!source.TryGetProperty("fields", out var fields) || fields.ValueKind != JsonValueKind.Object) return new(ip, "resolved", "未查询到归属地");
+            var latitude = Coordinate(fields, "latitude");
+            var longitude = Coordinate(fields, "longitude");
+            var hasCoordinates = IPLocationAddress.HasCoordinates(latitude, longitude);
+            var version = Text(source, "version", 128);
+            // 坐标必须来自所选数据库的同一条结果，缺一项时不从其它库或地名推测。
             var result = new IPLocationResult(ip, "resolved", Country: Text(fields, "country"), Province: Text(fields, "region"),
-                City: Text(fields, "city"), District: Text(fields, "district"), Isp: Text(fields, "isp"));
+                City: Text(fields, "city"), District: Text(fields, "district"), Isp: Text(fields, "isp"),
+                Latitude: hasCoordinates ? latitude : null, Longitude: hasCoordinates ? longitude : null,
+                Source: database, Version: version.Length == 0 || version.Any(char.IsControl) ? null : version);
             var name = string.Join(" · ", new[] { result.Country, result.Province, result.City, result.District, result.Isp }.Where(value => value.Length > 0).Distinct());
             return result with { DisplayName = name.Length > 0 ? name : "未查询到归属地" };
         }
         return Failed(ip);
     }
 
-    private static string Text(JsonElement element, string name)
+    private static double? Coordinate(JsonElement fields, string name) =>
+        fields.TryGetProperty(name, out var property) && property.ValueKind == JsonValueKind.Number &&
+        property.TryGetDouble(out var value) ? value : null;
+
+    private static string Text(JsonElement element, string name, int limit = 256)
     {
         if (!element.TryGetProperty(name, out var property) || property.ValueKind != JsonValueKind.String) return "";
         var text = property.GetString()?.Trim() ?? "";
-        return text[..Math.Min(text.Length, 256)];
+        return text[..Math.Min(text.Length, limit)];
     }
 
     private static IPLocationResult Failed(string ip) => new(ip, "failed", "归属地解析失败");

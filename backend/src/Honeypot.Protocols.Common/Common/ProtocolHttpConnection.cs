@@ -18,6 +18,9 @@ public sealed class ProtocolHttpConnection : IAsyncDisposable
     private X509Certificate2? _certificate;
     private int _prefix = -1;
     private long _bytes;
+    private readonly byte[] _readBuffer = new byte[4096];
+    private int _readOffset;
+    private int _readCount;
     public ProtocolHttpConnection(IHoneypotSession session, ServiceProfile profile) { _session = session; _profile = profile; }
 
     public async ValueTask<bool> InitializeAsync(CancellationToken ct)
@@ -30,7 +33,7 @@ public sealed class ProtocolHttpConnection : IAsyncDisposable
         if (first[0] == 0x16)
         {
             if (_session is not IRawStreamHoneypotSession raw) throw new InvalidDataException("TLS stream unavailable");
-            _certificate = ProtocolTls.CreateServerCertificate(ProtocolFingerprint.HostName(_profile));
+            _certificate = ProtocolTls.GetServerCertificate(_profile);
             _tls = new SslStream(new PrefixStream(raw.RawStream, first[0]), leaveInnerStreamOpen: true);
             await _tls.AuthenticateAsServerAsync(new SslServerAuthenticationOptions
             {
@@ -162,11 +165,15 @@ public sealed class ProtocolHttpConnection : IAsyncDisposable
     private async ValueTask<int> ByteAsync(CancellationToken ct)
     {
         if (_prefix >= 0) { var b = _prefix; _prefix = -1; return b; }
-        var buffer = new byte[1];
-        var n = _stream is null ? await _session.ReadAsync(buffer, ct) : await _stream.ReadAsync(buffer, ct);
-        if (n == 0) return -1;
+        if (_readOffset == _readCount)
+        {
+            // 保留同连接的后续数据，整帧仍由解析器逐字节计量，网络读取按固定小块进行。
+            _readOffset = 0;
+            _readCount = _stream is null ? await _session.ReadAsync(_readBuffer, ct) : await _stream.ReadAsync(_readBuffer, ct);
+            if (_readCount == 0) return -1;
+        }
         if (++_bytes > _profile.MaxSessionBytes) throw new InvalidDataException("HTTP session limit");
-        return buffer[0];
+        return _readBuffer[_readOffset++];
     }
     private async ValueTask WriteBytesAsync(ReadOnlyMemory<byte> bytes, CancellationToken ct)
     {

@@ -1,3 +1,5 @@
+import { downloadBlob } from './downloadBlob';
+
 export type ExcelCell = string | number | boolean | null | undefined;
 
 export interface ExcelSheet {
@@ -157,20 +159,10 @@ export async function exportExcel(
     ),
     { level: 1 },
   );
-  const anchor = document.createElement('a');
-  anchor.download = `${
+  const filenameWithExtension = `${
     cleanXml(filename)
       .replace(/[<>:"/\\|?*\t\n\r]/g, '-')
       .trim() || 'export'
   }.xlsx`;
-  const url = URL.createObjectURL(new Blob([archive], { type: MIME_TYPE }));
-  anchor.href = url;
-  try {
-    document.body.append(anchor);
-    anchor.click();
-  } finally {
-    anchor.remove();
-    // 延迟到点击处理完成后释放 URL，给浏览器读取 Blob 的机会。
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-  }
+  downloadBlob(filenameWithExtension, new Blob([archive], { type: MIME_TYPE }));
 }

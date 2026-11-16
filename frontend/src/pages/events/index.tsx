@@ -5,8 +5,8 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import CredentialEvidenceModal, { type CredentialEvidenceTarget } from '@/components/CredentialEvidenceModal';
 import ExcelExportButton from '@/components/ExcelExportButton';
 import SourceIp from '@/components/SourceIp';
-import { getConnectionEvents, getEvents, normalizePage, type InteractionEvent } from '@/services/honeypot/api';
-import { connectHoneypotRealtime } from '@/services/realtime';
+import { getConnectionEvents, getEvents, loadExportRows, normalizePage, type InteractionEvent, type PageResult } from '@/services/honeypot/api';
+import { useRealtimeRefresh } from '@/hooks/useRealtimeRefresh';
 
 const outcomeColors: Record<string, string> = {
   completed: 'green', failure: 'red', rejected: 'red', invalid: 'orange',
@@ -18,6 +18,13 @@ const eventTypes = [
   'AuthenticationAttempted', 'AuthorizationDenied', 'AuthenticationRequired', 'HandshakeTimeout',
   'ConnectionAccepted', 'ProtocolViolation', 'ResourceLimitExceeded', 'CredentialCaptureFailed',
 ];
+
+const protocolFailureStages = new Map([
+  ['TDS_PRELOGIN_INVALID', 'prelogin'],
+  ['TDS_TLS_FAILED', 'tls'],
+  ['TDS_LOGIN7_INVALID', 'login'],
+  ['TDS_INTEGRATED_AUTH_INVALID', 'integrated'],
+]);
 
 const EventActivityList: React.FC<{ initialSourceIp: string; initialEventType?: string }> = ({ initialSourceIp, initialEventType }) => {
   const intl = useIntl();
@@ -31,8 +38,9 @@ const EventActivityList: React.FC<{ initialSourceIp: string; initialEventType?: 
   const materialLabel = (record: InteractionEvent) => record.credentialArtifactId
     ? `${intl.formatMessage({ id: `events.material.${record.materialType}`, defaultMessage: t('material.unknown') })} · ${t('capture.saved')}`
     : t(record.credentialCaptureStatus === 'Disabled' ? 'capture.disabled' : 'capture.none');
-  const [snapshot, setSnapshot] = useState<{ rows: InteractionEvent[]; sourceIp: string; eventType?: string }>({ rows: [], sourceIp: '' });
-  const { rows } = snapshot;
+  const [snapshot, setSnapshot] = useState<{ result: PageResult<InteractionEvent>; sourceIp: string; eventType?: string }>({ result: normalizePage(undefined), sourceIp: '' });
+  const { items: rows, total } = snapshot.result;
+  const [page, setPage] = useState(1);
   const requestId = useRef(0);
   const [sourceIp, setSourceIp] = useState(initialSourceIp);
   const [eventType, setEventType] = useState(initialEventType);
@@ -48,26 +56,24 @@ const EventActivityList: React.FC<{ initialSourceIp: string; initialEventType?: 
     const currentRequest = ++requestId.current;
     setLoading(true);
     try {
-      const response = await getEvents({ sourceIp, eventType, view: 'activity', page: 1, pageSize: 50 });
+      const response = await getEvents({ sourceIp, eventType, view: 'activity', page, pageSize: 20 });
       if (requestId.current !== currentRequest) return;
-      setSnapshot({ rows: normalizePage(response.data).items, sourceIp, eventType });
+      const result = normalizePage(response.data);
+      if (page > 1 && result.items.length === 0) setPage(Math.max(1, Math.ceil(result.total / 20)));
+      setSnapshot({ result, sourceIp, eventType });
       setError(false);
     } catch {
       if (requestId.current === currentRequest) setError(true);
     } finally {
       if (requestId.current === currentRequest) setLoading(false);
     }
-  }, [eventType, sourceIp]);
+  }, [eventType, page, sourceIp]);
 
   useEffect(() => {
     void load();
-    let active = true;
-    let cleanup: (() => Promise<void>) | undefined;
-    void connectHoneypotRealtime({ onEvent: () => { if (active) void load(); } })
-      .then((dispose) => { if (active) cleanup = dispose; else void dispose(); })
-      .catch(() => { /* 实时通道不可用时仍保留 REST 查询。 */ });
-    return () => { active = false; requestId.current++; void cleanup?.(); };
+    return () => { requestId.current++; };
   }, [load]);
+  useRealtimeRefresh(load);
 
   useEffect(() => {
     let active = true;
@@ -94,6 +100,23 @@ const EventActivityList: React.FC<{ initialSourceIp: string; initialEventType?: 
     </Space>;
   };
   const resultCell = (value?: string) => value ? <Tag color={outcomeColors[value.toLowerCase()] ?? 'default'}>{outcomeLabel(value)}</Tag> : '-';
+  const stepSummary = (record: InteractionEvent) => {
+    const code = record.protocolErrorCode;
+    const stage = record.adapterKey?.toLowerCase() === 'mssql' && code ? protocolFailureStages.get(code) : undefined;
+    if (!stage) return record.payloadSummary;
+
+    // 固定错误码决定显示内容，诊断行不输出任何自由文本或认证报文。
+    return <Space orientation="vertical" size={2}>
+      <Space size={6}>
+        <Typography.Text type="secondary">{t('protocolFailure.stage')}</Typography.Text>
+        <Typography.Text>{t(`protocolFailure.${stage}`)}</Typography.Text>
+      </Space>
+      <Space size={6}>
+        <Typography.Text type="secondary">{t('protocolFailure.code')}</Typography.Text>
+        <Typography.Text code>{code}</Typography.Text>
+      </Space>
+    </Space>;
+  };
 
   const exportHeaders = [
     'events.time', 'events.event', 'events.sourceIp', 'excel.sourcePort', 'excel.destinationIp', 'events.port',
@@ -128,28 +151,41 @@ const EventActivityList: React.FC<{ initialSourceIp: string; initialEventType?: 
       <Typography.Title level={3}>{t('title')}</Typography.Title>
       <Typography.Paragraph type="secondary">{t('grouping')}</Typography.Paragraph>
       <Space wrap style={{ marginBottom: 16 }}>
-        <Input placeholder={t('sourceIp')} value={sourceIp} onChange={(event) => setSourceIp(event.target.value)} onPressEnter={() => void load()} />
-        <Select allowClear placeholder={t('type')} style={{ width: 190 }} value={eventType} onChange={setEventType} options={eventTypes.map((type) => ({ value: type, label: eventLabel(type) }))} />
+        <Input placeholder={t('sourceIp')} value={sourceIp} onChange={(event) => { setSourceIp(event.target.value); setPage(1); }} onPressEnter={() => void load()} />
+        <Select allowClear placeholder={t('type')} style={{ width: 190 }} value={eventType} onChange={(value) => { setEventType(value); setPage(1); }} options={eventTypes.map((type) => ({ value: type, label: eventLabel(type) }))} />
         <Button type="primary" onClick={() => void load()}>{t('query')}</Button>
         <ExcelExportButton
           filename="threat-events" sheetName={t('title')}
           disabled={loading || error || rows.length === 0 || snapshot.sourceIp !== sourceIp || snapshot.eventType !== eventType}
-          headers={exportHeaders} rows={() => rows.map(exportRow)}
-          additionalSheets={async () => {
+          headers={exportHeaders}
+          prepare={async () => {
+            const activities = await loadExportRows(
+              (query) => getEvents({ ...query, sourceIp, eventType, view: 'activity' }),
+              (row) => row.eventId,
+              snapshot.result,
+            );
             // 步骤表只收录命中当前行为筛选的连接；原始证据仍走单独的管理员导出。
-            const connectionIds = new Set(rows.map((row) => row.connectionId));
-            const response = await getEvents({ sourceIp, view: 'raw' });
-            if (!response.success || !response.data) throw new Error('Connection steps unavailable');
-            const details = normalizePage(response.data).items
-              .filter((row) => connectionIds.has(row.connectionId))
-              .sort((left, right) => left.connectionId.localeCompare(right.connectionId) || left.sequence - right.sequence);
-            return [{ name: t('details'), headers: exportHeaders, rows: details.map(exportRow) }];
+            const ids = [...new Set(activities.map((row) => row.connectionId))].sort();
+            const details: InteractionEvent[] = [];
+            for (let offset = 0; offset < ids.length; offset += 32) {
+              const batch = new Set(ids.slice(offset, offset + 32));
+              const items = await loadExportRows(
+                (query) => getEvents({ ...query, sourceIp, view: 'raw', connectionIds: [...batch].join(',') }),
+                (row) => row.eventId,
+              );
+              details.push(...items.filter((row) => batch.has(row.connectionId)));
+            }
+            details.sort((left, right) => left.connectionId.localeCompare(right.connectionId) || left.sequence - right.sequence);
+            return {
+              rows: activities.map(exportRow),
+              additionalSheets: [{ name: t('details'), headers: exportHeaders, rows: details.map(exportRow) }],
+            };
           }}
         />
       </Space>
       {error && <Alert title={t('unavailable')} type="warning" showIcon style={{ marginBottom: 16 }} />}
       <Card>
-        {loading ? <Spin /> : rows.length === 0 ? <Empty description={t('empty')} /> : <Table rowKey="eventId" dataSource={rows} columns={columns} pagination={{ pageSize: 20 }} scroll={{ x: 1860 }} />}
+        {loading && rows.length === 0 ? <Spin /> : rows.length === 0 ? <Empty description={t('empty')} /> : <Table rowKey="eventId" loading={loading} dataSource={rows} columns={columns} pagination={{ current: page, pageSize: 20, total, showSizeChanger: false, onChange: setPage }} scroll={{ x: 1860 }} />}
       </Card>
       <Modal title={t('details')} open={Boolean(connection)} onCancel={() => setConnection(null)} footer={null} width={1000} destroyOnHidden>
         {connection && <Descriptions column={2} size="small" items={[
@@ -167,7 +203,7 @@ const EventActivityList: React.FC<{ initialSourceIp: string; initialEventType?: 
           { title: t('time'), dataIndex: 'occurredAtUtc', render: timeLabel, width: 180 },
           { title: t('event'), dataIndex: 'eventType', render: eventLabel, width: 200 },
           { title: t('result'), dataIndex: 'outcome', render: resultCell, width: 100 },
-          { title: t('summary'), dataIndex: 'payloadSummary' },
+          { title: t('summary'), key: 'summary', render: (_, record) => stepSummary(record) },
         ]} />
       </Modal>
       <CredentialEvidenceModal target={evidenceTarget} onClose={() => setEvidenceTarget(null)} />

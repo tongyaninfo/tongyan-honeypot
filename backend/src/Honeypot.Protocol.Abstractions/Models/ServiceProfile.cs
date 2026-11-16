@@ -8,9 +8,11 @@ public sealed record ServiceProfile
     public required string ProfileId { get; init; }
     public required string AdapterKey { get; init; }
     public string AdapterVersion { get; init; } = "1";
+    /// <summary>仿真产品标识，将直接发送给对端。</summary>
     public string AdvertisedProduct { get; init; } = "Honeypot Service";
+    /// <summary>仿真产品版本，将直接发送给对端。</summary>
     public string AdvertisedVersion { get; init; } = "0.1.0";
-    /// <summary>对外呈现的主机名；为空时由适配器按协议生成拟真默认值。</summary>
+    /// <summary>虚构主机名，供协议握手和仿真证书使用。为空时采用对应协议的仿真默认值。</summary>
     public string? AdvertisedHostName { get; init; }
     public string FidelityLevel { get; init; } = "L1";
     public string AuthMode { get; init; } = "AlwaysFail";

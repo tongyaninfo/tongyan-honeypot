@@ -11,12 +11,7 @@ public static class OverviewMetricsReader
     public static OverviewMetrics Read(IInteractionEventStore events, IThreatProfileStore threats,
         IListenerHost listenerHost, IServiceInstanceStore instances, DateTimeOffset now, bool includeHost)
     {
-        // 总览和导出默认以 Asia/Shanghai 展示，今日统计按同一自然日计算。
-        var shanghaiOffset = TimeSpan.FromHours(8);
-        var dayStart = new DateTimeOffset(now.ToOffset(shanghaiOffset).Date, shanghaiOffset);
-        var nextDayStart = dayStart.AddDays(1);
         var allEvents = events.GetAll();
-        var authenticationFailures = allEvents.Where(OverviewActivityProjection.IsAuthenticationFailure);
         var listeners = listenerHost.GetStatuses();
         var instanceById = instances.GetAll()
             .ToDictionary(item => item.InstanceId, StringComparer.OrdinalIgnoreCase);
@@ -38,13 +33,13 @@ public static class OverviewMetricsReader
         {
             GeneratedAtUtc = now,
             EventCount = allEvents.Count,
-            AcceptedConnections = allEvents.Count(item => item.EventType.Equals("ConnectionAccepted", StringComparison.OrdinalIgnoreCase)),
+            AcceptedConnections = allEvents.Count(OverviewActivityProjection.IsConnectionAccepted),
             AuthenticationAttempts = allEvents.Count(item => item.EventType.Equals("AuthenticationAttempted", StringComparison.OrdinalIgnoreCase)),
-            AuthenticationFailures = authenticationFailures.Count(),
-            TodayAuthenticationFailures = authenticationFailures.Count(item => item.OccurredAtUtc >= dayStart && item.OccurredAtUtc < nextDayStart),
+            AuthenticationFailures = allEvents.Count(OverviewActivityProjection.IsAuthenticationFailure),
+            TodayAuthenticationFailures = OverviewActivityProjection.TodayAuthenticationFailures(allEvents, now).Count(),
             ProtocolViolations = allEvents.Count(item => item.EventType.Equals("ProtocolViolation", StringComparison.OrdinalIgnoreCase)),
             SessionClosed = allEvents.Count(item => item.EventType.Equals("SessionClosed", StringComparison.OrdinalIgnoreCase)),
-            ThreatIpCount = threats.GetAll().Count,
+            ThreatIpCount = threats.Count(),
             ServiceInstanceCount = instances.GetAll().Count,
             ListenerCount = listeners.Count,
             RunningListenerCount = listeners.Count(item => item.State.Equals("Running", StringComparison.OrdinalIgnoreCase)),

@@ -12,7 +12,7 @@ npm test
 npm run build
 ```
 
-开发时 `/api` 请求代理到 `http://localhost:5080`。生产环境通过 `HONEYPOT_API_BASE_URL` 或同源反向代理配置 API 地址；不要在前端写入凭据。
+开发代理通过 `https://localhost:5080` 访问本机 API，并支持该地址上的临时自签证书。生产环境通过 `HONEYPOT_API_BASE_URL` 或同源 HTTPS 反向代理配置 API 地址；不要在前端写入凭据。
 
 部署域名需要在部署方案确认后单独配置，模板演示资源不会自动成为生产域名或品牌配置。
 

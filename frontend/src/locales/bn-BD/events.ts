@@ -2,6 +2,16 @@ import base from '../en-US/events';
 
 export default {
   ...base,
+  'passwordBook.account': 'অ্যাকাউন্ট',
+  'passwordBook.service': 'সেবা',
+  'passwordBook.authCount': 'প্রমাণীকরণের চেষ্টা',
+  'passwordBook.lastUsed': 'শেষ ব্যবহারের সময়',
+  'passwordBook.loadingPassword': 'লোড হচ্ছে…',
+  'passwordBook.emptyPassword': '(খালি পাসওয়ার্ড)',
+  'passwordBook.unavailablePassword': 'প্রমাণ পাওয়া যায়নি বা মেয়াদ শেষ',
+  'passwordBook.empty': 'কোনো পাসওয়ার্ড রেকর্ড নেই',
+  'passwordBook.unavailable': 'পাসওয়ার্ড তালিকা এখন পাওয়া যাচ্ছে না',
+  'passwordBook.adminOnly': 'শুধু প্রশাসকেরা পাসওয়ার্ড তালিকা দেখতে পারেন।',
   'events.type.AuthorizationDenied': 'প্রবেশাধিকার প্রত্যাখ্যাত',
   'credentials.password': 'পাসওয়ার্ড',
   'credentials.passwordNotCaptured': 'সাধারণ টেক্সটে পাসওয়ার্ড ধরা পড়েনি',

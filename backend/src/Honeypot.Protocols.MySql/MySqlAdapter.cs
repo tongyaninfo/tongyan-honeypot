@@ -67,7 +67,7 @@ public sealed class MySqlAdapter : ProtocolAdapterBase
             {
                 if (!supportsTls || (BinaryPrimitives.ReadUInt32LittleEndian(response) & Protocol41) == 0)
                     throw new InvalidDataException();
-                using var certificate = ProtocolTls.CreateServerCertificate(ProtocolFingerprint.HostName(profile));
+                using var certificate = ProtocolTls.GetServerCertificate(profile);
                 tls = new SslStream(((IRawStreamHoneypotSession)session).RawStream, leaveInnerStreamOpen: true);
                 await tls.AuthenticateAsServerAsync(new SslServerAuthenticationOptions
                 {

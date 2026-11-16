@@ -10,7 +10,11 @@ public sealed record ListenerRuntimeStatus(
     int ActiveConnections,
     long AcceptedCount,
     long ErrorCount,
-    string? LastError);
+    string? LastError)
+{
+    public long RejectedCount { get; init; }
+    public long EventWriteFailureCount { get; init; }
+}
 
 public sealed record ListenerApplyResult(bool Succeeded, string Code, string Message)
 {

@@ -49,10 +49,16 @@ export async function initializeSystem(data: { username: string; password: strin
 }
 
 export async function login(data: { username: string; password: string }) {
-  return request<ApiResult<LoginResult>>('/api/v1/auth/login', {
-    method: 'POST',
-    data,
-  });
+  try {
+    return await request<ApiResult<LoginResult>>('/api/v1/auth/login', {
+      method: 'POST',
+      data,
+      skipErrorHandler: true,
+    });
+  } catch (error) {
+    const body = (error as { response?: { data?: { message?: string } } })?.response?.data;
+    throw new Error(body?.message || '登录失败，请检查账号和密码。');
+  }
 }
 
 export async function getCurrentUser() {

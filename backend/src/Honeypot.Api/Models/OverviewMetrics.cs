@@ -1,7 +1,9 @@
+using System.Text.Json.Serialization;
+
 namespace Honeypot.Api.Models;
 
 /// <summary>
-/// 管理台运行总览使用的聚合指标。运行数据来自当前进程内事件和监听器状态。
+/// 管理台总览的运行指标和历史趋势。
 /// </summary>
 public sealed record OverviewMetrics
 {
@@ -28,6 +30,15 @@ public sealed record OverviewMetrics
     public IReadOnlyCollection<HourlyActivityMetric> ActivityByHour { get; init; } = [];
     public required IReadOnlyCollection<ListenerOverview> Listeners { get; init; }
     public HostOverview? Host { get; init; }
+    public EventStorageMetrics? EventStorage { get; init; }
+}
+
+public sealed record EventStorageMetrics(int QueueDepth, long RejectedEvents, long DatabaseBytes, bool DiskBudgetBlocked,
+    bool RetentionAvailable, DateTimeOffset? LastPersistedAtUtc)
+{
+    internal static EventStorageMetrics From(Service.impl.ReportIngestionHealth health) => new(
+        health.EventQueueDepth, health.RejectedEvents, health.DatabaseBytes, health.DiskBudgetBlocked,
+        health.RetentionAvailable, health.LastPersistedAtUtc);
 }
 
 public sealed record HostOverview(
@@ -46,7 +57,11 @@ public sealed record AdapterActivityMetric(
     int ProtocolViolations,
     DateTimeOffset LastActivityAtUtc);
 
-public sealed record HourlyActivityMetric(string Key, int AcceptedConnections, int AuthenticationFailures);
+public sealed record HourlyActivityMetric(string Key, long? AcceptedConnections, long? AuthenticationFailures)
+{
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? CoverageStatus { get; init; }
+}
 
 public sealed record ListenerOverview(
     string ListenerId,

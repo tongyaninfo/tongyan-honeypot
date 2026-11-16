@@ -34,6 +34,7 @@ public sealed class RealtimeInteractionEventSink : IInteractionEventSink, ICrede
         InteractionEvent interactionEvent,
         CancellationToken cancellationToken = default)
     {
+        interactionEvent = InteractionEventSanitizer.Sanitize(interactionEvent);
         var result = await _inner.AppendAsync(interactionEvent, cancellationToken);
         if (!result.Recorded || result.IsDuplicate)
         {

@@ -136,14 +136,15 @@ public sealed class McpBusinessToolService(IProtocolAdapterRegistry adapters, IS
         var eventType = args.String("eventType");
         var port = args.Int("destinationPort");
         var (from, to) = ReadRange(args);
-        var matching = events.GetAll().Where(item => Matches(item.SourceIp, source) && Matches(item.AdapterKey, adapter) &&
-            (port is null || item.DestinationPort == port));
+        var query = new InteractionEventQuery(source, adapter, eventType, port,
+            FromUtc: from, ToUtc: to, Page: args.Page, PageSize: args.PageSize);
         if (args.String("view") == "raw")
-            return Page(matching.Where(item => Matches(item.EventType, eventType) && InRange(item.OccurredAtUtc, from, to))
-                .OrderByDescending(item => item.OccurredAtUtc).ThenByDescending(item => item.Sequence).ThenBy(item => item.EventId, StringComparer.Ordinal),
-                args, item => ProjectEvent(RealtimeInteractionEvent.From(item)));
-        return Page(InteractionActivityProjection.Build(matching).Where(item => Matches(item.EventType, eventType) && InRange(item.OccurredAtUtc, from, to)),
-            args, ProjectEvent);
+        {
+            var raw = events.ReadEvents(query);
+            return Ok(new { items = raw.Items.Select(item => ProjectEvent(RealtimeInteractionEvent.From(item))).ToArray(), raw.Total, raw.Page, raw.PageSize });
+        }
+        var activities = events.ReadActivities(query);
+        return Ok(new { items = activities.Items.Select(ProjectEvent).ToArray(), activities.Total, activities.Page, activities.PageSize });
     }
 
     private ApiResult<object> GetTimeline(McpToolArguments args)
@@ -175,28 +176,25 @@ public sealed class McpBusinessToolService(IProtocolAdapterRegistry adapters, IS
         var minimumScore = args.Int("minimumScore") ?? 0;
         var status = args.String("status");
         var (from, to) = ReadRange(args);
-        return Page(threats.GetAll().Where(item => Matches(item.SourceIp, source) && item.CurrentScore >= minimumScore &&
-                Matches(item.Status, status) && InRange(item.LastSeenUtc, from, to))
-            .OrderByDescending(item => item.CurrentScore).ThenByDescending(item => item.LastSeenUtc)
-            .ThenBy(item => item.SourceIp, StringComparer.Ordinal), args, ProjectThreat);
+        var matching = threats.Query(new(args.Page, args.PageSize, ThreatProfileSort.Risk, source, minimumScore,
+            status, from, to));
+        return Ok(new { items = matching.Items.Select(ProjectThreat).ToArray(), matching.Total, matching.Page, matching.PageSize });
     }
 
     private ApiResult<object> GetThreat(string source) => threats.GetByIp(source) is { } item ? Ok(ProjectThreat(item)) : Missing();
 
     private static object ProjectThreat(ThreatIpProfile item)
     {
-        // 威胁聚合服务使用此锁更新同一对象和端口集合。
-        lock (item)
-            return new
-            {
-                item.ThreatId, item.SourceIp, item.FirstSeenUtc, item.LastSeenUtc, item.CurrentScore, item.MaxScore,
-                item.ScoreVersion, item.Status, item.AttemptCount, item.SessionCount, item.ActiveSessionCount,
-                item.AuthenticationAttemptCount, item.ProtocolViolationCount,
-                servicesTouched = item.ServicesTouched.Order(StringComparer.Ordinal).Take(McpToolCatalog.MaximumPageSize).ToArray(),
-                portsTouched = item.PortsTouched.Order().Take(McpToolCatalog.MaximumPageSize).ToArray(),
-                servicesTouchedCount = item.ServicesTouched.Count, portsTouchedCount = item.PortsTouched.Count,
-                item.LastEventId, item.ExpiresAtUtc,
-            };
+        return new
+        {
+            item.ThreatId, item.SourceIp, item.FirstSeenUtc, item.LastSeenUtc, item.CurrentScore, item.MaxScore,
+            item.ScoreVersion, item.Status, item.AttemptCount, item.SessionCount, item.ActiveSessionCount,
+            item.AuthenticationAttemptCount, item.ProtocolViolationCount,
+            servicesTouched = item.ServicesTouched.Order(StringComparer.Ordinal).Take(McpToolCatalog.MaximumPageSize).ToArray(),
+            portsTouched = item.PortsTouched.Order().Take(McpToolCatalog.MaximumPageSize).ToArray(),
+            servicesTouchedCount = item.ServicesTouched.Count, portsTouchedCount = item.PortsTouched.Count,
+            item.LastEventId, item.ExpiresAtUtc,
+        };
     }
 
     private ApiResult<object> ListEvidence(McpToolArguments args)

@@ -1,4 +1,5 @@
 export default {
+  'menu.passwordBook': 'パスワード一覧',
   'menu.welcome': 'ようこそ',
   'menu.more-blocks': 'その他のブロック',
   'menu.home': 'ホーム',

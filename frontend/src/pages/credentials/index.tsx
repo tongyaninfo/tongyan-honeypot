@@ -1,12 +1,12 @@
 import { useAccess, useIntl } from '@umijs/max';
 import { Alert, Button, Card, Empty, Spin, Table, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import CredentialEvidenceModal, { type CredentialEvidenceTarget } from '@/components/CredentialEvidenceModal';
 import ExcelExportButton from '@/components/ExcelExportButton';
 import SourceIp from '@/components/SourceIp';
-import { evidenceExportBatchSize, exportCredentialEvidence, getCredentialEvidenceSummaries, normalizePage, type CredentialEvidenceSummary } from '@/services/honeypot/api';
-import { connectHoneypotRealtime } from '@/services/realtime';
+import { evidenceExportBatchSize, exportCredentialEvidence, getCredentialEvidenceSummaries, loadExportRows, normalizePage, type CredentialEvidenceSummary, type PageResult } from '@/services/honeypot/api';
+import { useRealtimeRefresh } from '@/hooks/useRealtimeRefresh';
 import { getCapturedPassword, isPasswordMaterial, parseCredentialEvidenceFields } from '@/utils/credentialEvidence';
 import { type ExcelCell, MAX_EXCEL_CELL_LENGTH } from '@/utils/exportExcel';
 import PasswordCell from './PasswordCell';
@@ -36,39 +36,35 @@ const CredentialsPage: React.FC = () => {
   const timeLabel = (value: string) => new Date(value).toLocaleString(intl.locale, { timeZone: 'Asia/Shanghai' });
   const materialLabel = (value: string) => intl.formatMessage({ id: `events.material.${value}`, defaultMessage: t('events.material.unknown') });
   const [evidenceTarget, setEvidenceTarget] = useState<CredentialEvidenceTarget | null>(null);
-  const [rows, setRows] = useState<CredentialEvidenceSummary[]>([]);
+  const [snapshot, setSnapshot] = useState<PageResult<CredentialEvidenceSummary>>(() => normalizePage(undefined));
+  const { items: rows, total } = snapshot;
+  const [page, setPage] = useState(1);
+  const requestId = useRef(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
 
   const load = useCallback(async () => {
+    const id = ++requestId.current;
+    setLoading(true);
     try {
-      const response = await getCredentialEvidenceSummaries();
-      setRows(normalizePage(response.data).items);
+      const response = await getCredentialEvidenceSummaries({ page, pageSize: 20 });
+      if (requestId.current !== id) return;
+      const result = normalizePage(response.data);
+      if (page > 1 && result.items.length === 0) setPage(Math.max(1, Math.ceil(result.total / 20)));
+      setSnapshot(result);
       setError(false);
     } catch {
-      setRows([]);
-      setError(true);
+      if (requestId.current === id) setError(true);
     } finally {
-      setLoading(false);
+      if (requestId.current === id) setLoading(false);
     }
-  }, []);
+  }, [page]);
 
   useEffect(() => {
     void load();
-    let cleanup: (() => Promise<void>) | undefined;
-    void connectHoneypotRealtime({
-      onEvent: () => void load(),
-    })
-      .then((dispose) => {
-        cleanup = dispose;
-      })
-      .catch(() => {
-        // 实时通道不可用时仍保留 REST 查询。
-      });
-    return () => {
-      void cleanup?.();
-    };
+    return () => { requestId.current++; };
   }, [load]);
+  useRealtimeRefresh(load);
 
   const columns: ColumnsType<CredentialEvidenceSummary> = [
     { title: t('credentials.capturedAt'), dataIndex: 'capturedAtUtc', render: timeLabel },
@@ -97,7 +93,8 @@ const CredentialsPage: React.FC = () => {
         filename="credential-evidence" sheetName={t('credentials.title')} label={t('excel.detailedEvidence')} disabled={loading || error || rows.length === 0}
         headers={['credentials.capturedAt', 'events.sourceIp', 'credentials.protocol', 'credentials.materialType', 'credentials.password', 'credentials.eventId', 'excel.connectionId', 'events.evidence.id', 'credentials.retentionUntil', 'excel.truncated'].map(t)}
         prepare={async () => {
-          const ids = rows.map((row) => row.credentialArtifactId);
+          const summaries = await loadExportRows(getCredentialEvidenceSummaries, (row) => row.credentialArtifactId, snapshot);
+          const ids = summaries.map((row) => row.credentialArtifactId);
           const details: ExcelCell[][] = [];
           // 主表和明细表共用同一次经服务端鉴权与审计的原文读取。
           const passwords = new Map<string, string>();
@@ -125,7 +122,7 @@ const CredentialsPage: React.FC = () => {
             }
           }
           return {
-            rows: rows.map((row) => [
+            rows: summaries.map((row) => [
               timeLabel(row.capturedAtUtc), row.sourceIp, row.adapterKey, materialLabel(row.materialType),
               passwords.get(row.credentialArtifactId) ?? t('excel.unavailable'),
               row.eventId, row.connectionId, row.credentialArtifactId, row.retentionUntilUtc ? timeLabel(row.retentionUntilUtc) : undefined, row.truncated,
@@ -134,7 +131,7 @@ const CredentialsPage: React.FC = () => {
           };
         }}
       />}>
-        {loading ? <Spin /> : rows.length === 0 ? <Empty description="暂无记录" /> : <Table rowKey="credentialArtifactId" dataSource={rows} columns={columns} pagination={{ pageSize: 20 }} />}
+        {loading && rows.length === 0 ? <Spin /> : rows.length === 0 ? <Empty description="暂无记录" /> : <Table rowKey="credentialArtifactId" loading={loading} dataSource={rows} columns={columns} pagination={{ current: page, pageSize: 20, total, showSizeChanger: false, onChange: setPage }} />}
       </Card>
       <CredentialEvidenceModal target={evidenceTarget} onClose={() => setEvidenceTarget(null)} />
     </div>

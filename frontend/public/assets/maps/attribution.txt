@@ -1,0 +1,38 @@
+世界底图来源
+
+文件：world-110m.json
+用途：运行总览的二维请求流向背景。业务来源与目标位置来自本系统接口，不来自地图示例数据。
+固定版本：world-atlas@2.0.2 的 countries-110m.json。
+上游：https://github.com/topojson/world-atlas
+数据来源：由 Natural Earth 数据生成 TopoJSON。
+获取地址：https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/countries-110m.json
+运行时从本系统同源资源读取，不连接该 CDN。
+原始文件大小：107761 字节。
+SHA-256：2516c915867c7baf18ddec727aec46c315541a07cfb3d79a6559b05d5e94eee8
+
+软件许可：ISC；下方保留完整许可原文。
+许可来源：https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/LICENSE
+源地图数据：Natural Earth 使用条款说明其地图数据为公有领域。
+使用条款：https://www.naturalearthdata.com/about/terms-of-use/
+
+本文件只用于低精度世界位置示意，不提供街道、导航或精确设备位置。
+IP 归属地本身是近似推断；未知位置不补造坐标。
+地图底图版本与 IP 位置数据版本分别记录，不能把底图发布时间当作定位数据版本。
+
+本文是 README.md 的浏览器可读版本；更新版本、来源、摘要、许可或用途时，两份文件须同步维护。
+
+ISC 许可原文
+
+Copyright 2013-2019 Michael Bostock
+
+Permission to use, copy, modify, and/or distribute this software for any purpose
+with or without fee is hereby granted, provided that the above copyright notice
+and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
+FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS
+OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
+TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
+THIS SOFTWARE.

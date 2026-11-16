@@ -1,13 +1,15 @@
 # Honeypot 后端
 
-后端按 `Shared → Protocol.Abstractions → Runtime/Protocols → Engine → Api` 分层：公共合同不依赖宿主，监听运行时统一管理端口，协议适配器只处理协议拟真，判定引擎负责威胁聚合，API 负责管理和查询。报告所需事件白名单、运行采样、报告快照及邮件队列使用 SQLite 持久化；原事件列表、威胁档案和认证证据仍使用开发阶段内存实现。
+后端按 `Shared → Protocol.Abstractions → Runtime/Protocols → Engine → Api` 分层：公共合同不依赖宿主，监听运行时统一管理端口，协议适配器只处理协议拟真，判定引擎负责威胁聚合，API 负责管理和查询。详细事件、威胁档案、加密认证证据、业务审计以及报告数据统一由 SQLite 持久化，进程重启后可继续查询。
 
 ## 运行
 
 ```bash
 dotnet build backend/Honeypot.slnx
-dotnet run --project backend/src/Honeypot.Api/Honeypot.Api.csproj --urls http://localhost:5080
+dotnet run --project backend/src/Honeypot.Api/Honeypot.Api.csproj --no-launch-profile -- --urls https://localhost:5080
 ```
+
+管理端仅监听 HTTPS。默认自签证书在每次启动时生成，证书指纹写入启动日志。固定证书与非回环名称的配置见[部署说明](../deploy/README.md)。
 
 ## 目录约定
 

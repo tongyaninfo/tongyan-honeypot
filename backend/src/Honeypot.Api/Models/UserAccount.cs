@@ -13,3 +13,6 @@ public sealed record UserAccount(
 public sealed record AuthenticatedUser(string UserId, string Username, IReadOnlyList<string> Roles);
 
 public sealed record LoginResult(string AccessToken, DateTimeOffset ExpiresAtUtc, AuthenticatedUser User);
+
+public sealed record LoginAttemptResult(LoginResult? Session = null, DateTimeOffset? LockedUntilUtc = null, bool Busy = false,
+    bool LockoutStarted = false);

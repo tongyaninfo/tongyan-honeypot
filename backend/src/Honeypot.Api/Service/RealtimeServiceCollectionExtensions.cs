@@ -16,7 +16,9 @@ public static class RealtimeServiceCollectionExtensions
     public static IServiceCollection AddHoneypotRealtime(this IServiceCollection services)
     {
         services.AddSignalR();
-        services.AddSingleton<IRealtimeUpdateNotifier, SignalRRealtimeUpdateNotifier>();
+        services.AddSingleton<SignalRRealtimeUpdateNotifier>();
+        services.AddSingleton<IRealtimeUpdateNotifier>(provider => provider.GetRequiredService<SignalRRealtimeUpdateNotifier>());
+        services.AddHostedService(provider => provider.GetRequiredService<SignalRRealtimeUpdateNotifier>());
         services.AddSingleton<ICredentialEvidenceSink>(provider =>
             provider.GetRequiredService<IInteractionEventStore>() as ICredentialEvidenceSink
             ?? throw new InvalidOperationException("IInteractionEventStore must implement ICredentialEvidenceSink."));

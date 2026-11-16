@@ -31,15 +31,45 @@
 - `GET/POST /api/v1/service-instances`：服务实例查询和 SQLite 配置保存；实例、监听端口和启停策略随应用重启保留。
 - `POST /api/v1/service-instances/{id}/start`：启动实例监听。
 - `POST /api/v1/service-instances/{id}/stop`：停止实例全部监听。
+- `POST /api/v1/service-instances/{id}/restart-policy` 接收 `{ "autoStart": true }` 或关闭值，保存重启恢复策略并返回服务实例。实例的期望运行状态由启停操作维护。
 - `GET /api/v1/listeners`：监听器运行状态。
-- `GET /api/v1/metrics/overview`：运行总览聚合指标、适配器分布、结果分布、24 小时趋势和监听器明细。
+- `GET /api/v1/metrics/overview`：运行总览聚合指标、适配器分布、结果分布、24 小时趋势和监听器明细。`activityByHour` 从 SQLite 报表事实取当前小时及之前 23 个小时的连接和认证失败数，使用 UTC 小时键。认证失败沿用报表的 `failure`、`rejected`、`invalid` 口径。每小时的 `coverageStatus` 为 `complete`、`partial` 或 `unknown`，无已记录事件且无采集覆盖时计数为 `null`；部分覆盖时数值仅反映已记录事件。
+- `GET /api/v1/metrics/overview/connections`：运行总览的分页连接明细，支持 `scope/page/pageSize`。
+- `GET /api/v1/metrics/overview/connection-map`：运行总览的连接地图快照，默认最近 10 分钟，可用 `windowSeconds` 切换。
 - `GET /api/v1/events` 查询事件，可通过 `view=activity` 获取威胁事件页所用的行为列表。`GET /api/v1/connections/{connectionId}/events` 查询该连接的原始事件步骤。
 - `GET /api/v1/threats`、`GET /api/v1/threats/by-ip/{ip}`：威胁清单查询。
 - `GET /api/v1/credential-evidence` 查询认证证据摘要。`GET /api/v1/credential-evidence/{credentialArtifactId}` 和 `GET /api/v1/credential-evidence/audit` 分别供管理员读取单份证据原文和访问审计。
+- `GET /api/v1/password-book`：管理员按 `keyword/page/pageSize` 查询密码组合、认证次数及最近使用时间。
+- `GET /api/v1/management/audits` 供管理员按 `page/pageSize` 查询关键管理操作的时间、操作者、对象、动作与 HTTP 状态。预先登记的操作在中断后未写回结果时，查询会将其标记为 `Unknown`。
 - `POST /api/v1/credential-evidence/export`：供管理员批量读取证据原文，管理台据此生成详细 Excel。
 - `POST /hubs/honeypot/negotiate`：SignalR 实时通道协商，必须携带当前登录 Bearer 会话；WebSocket 连接使用同一 token 的 `access_token`。
 - 报告统计、通知设置、邮件任务和报告历史接口见下文“报告邮件通知”。
 - MCP 管理接口及智能体接入见下文“MCP 服务”。
+
+## 运行总览连接明细
+
+`scope=active` 查询监听器当前的活动连接；`accepted` 查询仍留存的连接接纳事件；`authenticationFailures` 查询北京时间今日且结果为 `failure` 的认证事件，同一连接的多次失败分别计数；`threatConnections` 对当前威胁清单中有留存连接的来源各取最近一条。活动连接由监听器运行时跟踪，无需根据历史事件推断。
+
+结果按时间倒序分页，同一时间按 `id` 升序排列。每行包含 `id / connectionId / occurredAtUtc / sourceIp / sourcePort / adapterKey / destinationPort`。缺少 `scope` 或传入未识别的值时返回 HTTP 400 和 `INVALID_SCOPE`。威胁 IP 指标包含没有留存连接的来源，这些来源不会出现在连接明细里。
+
+`scope=adapterActivity` 使用 `adapterKey` 筛选协议，并通过 `metric` 指定 `acceptedConnections`、`authenticationFailures`、`sourceIpCount` 或 `protocolViolations`。时间窗口和「协议活动」表一致，取包含当前小时的最近 24 个小时桶。来源 IP 数按地址去重，每个地址展示最近一条匹配活动。协议异常明细可返回诊断摘要。
+
+总览连接明细复用现有 IP 归属地解析。认证失败明细可返回 `username / credentialArtifactId / materialType`。管理员通过单条认证证据接口查看已采集的密码，每次读取都有审计。
+
+## 运行总览连接地图
+
+`GET /api/v1/metrics/overview/connection-map` 需要当前登录会话，设置 `Cache-Control: no-store`。`windowSeconds` 支持 `60`、`600`、`7200`、`86400`，默认 `600`，其他值返回 HTTP 400 和 `INVALID_WINDOW`。统计窗口包含起点和终点，从有界近期事件快照筛选 `ConnectionAccepted`，同一连接计一次。响应不包含账号、认证材料或报文。
+
+| 字段 | 说明 |
+| --- | --- |
+| `sampledAtUtc / windowSeconds / locationEnabled` | UTC 采样时刻、当前窗口秒数及 IP 定位开关。 |
+| `target` | `status` 为 `ready/pending/unavailable/disabled`，可带 `label/latitude/longitude/source/updatedAtUtc`。同一目标的缓存到期，或切换定位设置后仍在沿用上次成功结果时，`stale=true`。 |
+| `origins` | 窗口内已定位连接的来源汇总。每项含 `id/longitude/latitude/locationLabel/adapterKey/connectionCount/sourceIpCount/sources`。`sources` 每项含 `ip/country`，最多返回 12 个公网 IP，`sourceIpCount` 是该地点或格网的去重 IP 总数。多地点合并后采用最近连接的坐标和服务类型。 |
+| `adapterKeys` | 所有已定位连接涉及的服务类型，用于图例。 |
+| `events` | 最近 100 条具有有效坐标的连接，供实时飞线匹配和旧客户端使用。每条含 `id/occurredAtUtc/adapterKey/latitude/longitude/locationLabel/sourceIp/country`，`sourceIp` 为规范化公网 IP，`country` 缺失时为空。`locationSource/locationVersion` 随定位结果提供。 |
+| `coverage` | `observed` 为时间窗和快照内去重连接总数，等于 `mapped + unknown + private + pending`。`mapped` 为有坐标，`unknown` 为缺坐标、定位未启用或不可定位，`private` 为私网及其他特殊用途地址。`pending` 包含等待解析和等待入队，`deferred` 为其中尚在等待入队的连接。`omitted` 等于 `mapped - events.length`，用于兼容旧版；超出飞线列表的已定位连接仍汇总到 `origins`。 |
+
+首次打开查询窗口快照，页面经 `eventAppended` 接到接纳事件后合并刷新。每次检查所有候选 IP 的缓存，新 IP 最多 128 个按现有队列容量逐步入队。地图覆盖受近期事件快照的条数、时间边界、采集情况和数据源有效坐标影响。详见 [实时飞线地图实施方案](../spec/实时飞线地图实施方案.md)。
 
 ## 威胁事件查询
 
@@ -49,13 +79,21 @@
 
 活动条目的 `eventId` 指向代表事件，`eventCount` 表示该连接的事件步骤数量。客户端可使用 `connectionId` 查看完整步骤，用 `credentialArtifactId` 关联认证证据。两个视图的 `total` 均按所选视图和筛选条件统计，原始事件、威胁计数及证据存储独立于列表视图。
 
+MSSQL 的 `ProtocolViolation` 原始步骤可包含固定 `protocolErrorCode`。连接详情使用该码显示失败阶段，普通登录拒绝继续通过 `authenticationFailureCode` 返回 `18456`。历史事件没有分阶段错误码时继续显示原摘要。
+
 ## 认证证据访问
 
 证据摘要接口对已登录用户开放，仅返回来源、协议、材料类型、关联 ID、采集和留存时间等元数据。证据原文接口根据当前 Bearer 会话在服务端验证 `Administrator` 角色（兼容旧 `admin`，忽略大小写），返回 `data.summary` 和 `data.content`，并设置 `Cache-Control: no-store`。前端使用同一服务端角色合同；页面显示不能替代服务端权限检查。
 
-应用已初始化时，无有效会话返回 HTTP 401，非管理员请求原文或审计返回 HTTP 403，管理员请求不存在或已过期的证据返回 HTTP 404 和 `NOT_FOUND_OR_EXPIRED`。原文读取结果写入有界内存审计，审计接口返回访问人、时间、证据 ID 和结果等元数据。RDP NTLM 证据保存收到的挑战和响应，材料类型为 `Response`。
+应用已初始化时，无有效会话返回 HTTP 401，非管理员请求原文或审计返回 HTTP 403，管理员请求不存在或已过期的证据返回 HTTP 404 和 `NOT_FOUND_OR_EXPIRED`。原文访问审计写入 SQLite，审计接口最多返回最近 10,000 条有效记录内的访问人、时间、证据 ID 和结果。审计写入失败时返回 `EVIDENCE_AUDIT_FAILED`。RDP NTLM 证据保存收到的挑战和响应，材料类型为 `Response`。
 
 原文导出请求形如 `{ "artifactIds": ["cred-00000000000000000000000000000001"] }`。每批最多 8 个不同的证据 ID，请求正文最多 4 KiB。只有管理员可调用；不合法的批次返回 HTTP 400。成功时 `data.items` 按请求顺序返回 `artifactId`、`outcome`，状态为 `OK` 的项目包含 `evidence.summary` 和 `evidence.content`。已过期或不存在的项目标记为 `NOT_FOUND_OR_EXPIRED`，不返回原文。响应设置 `Cache-Control: no-store`，审计用 `operation` 区分 `Read` 和 `Export`，不保存材料原文。
+
+## 密码簿查询
+
+`GET /api/v1/password-book?keyword=ssh&page=1&pageSize=20` 返回 `username / adapterKey / authenticationCount / lastUsedAtUtc / credentialArtifactId`，按最近一次认证尝试时间降序。可选的 `keyword` 按账号或服务做字面子串匹配，筛选作用于分页和总数。未登录和普通用户分别返回 HTTP 401 和 403，管理员查询响应使用 `Cache-Control: no-store`。
+
+分页接口只返回元数据。管理台使用每行的代表证据 ID 读取当前页密码，CSV 导出复用 `POST /api/v1/credential-evidence/export`。每次原文访问独立审计。密码簿从 SQLite 中的有效证据计算，过期证据不计入次数。纳入条件见 [密码簿实施方案](../spec/密码簿实施方案.md)。
 
 ## 规划接口
 
@@ -65,7 +103,7 @@
 
 管理台按单服务器、单适配器实例展示服务卡片；实例默认监听 `0.0.0.0`，端口可以配置多个。端口输入仅修改页面草稿，点击“应用端口”后才写入服务端；启动/停止共用一个按运行状态切换的按钮。
 
-真实传感器上报、完整事件/证据生产持久化、细粒度 RBAC、登录/封禁/解封事件告警、可靠审计和自动阻断接口尚未建立。报告通知及报告事件白名单已实现 SQLite 持久化；原事件列表、威胁档案和认证证据仍是进程内实现，不能把报告持久化等同于完整证据仓库。
+真实传感器上报、细粒度 RBAC、登录/封禁/解封事件告警和自动阻断接口尚未建立。事件详情、威胁档案、认证证据、证据访问审计和关键管理操作已接入 SQLite。部署完成情况以各环境的验证结果为准。
 
 ## 用户体系接口
 
@@ -81,7 +119,7 @@
 ## IP 数据库配置与异步归属地
 
 - `GET /api/v1/settings/ip-location`：管理员读取通研 IP 适配器设置。
-- `PUT /api/v1/settings/ip-location`：管理员保存设置，立即使旧解析任务与缓存失效。
+- `PUT /api/v1/settings/ip-location`：管理员保存设置，立即使旧的来源 IP 解析任务和缓存失效。同一蜜罐落点可沿用上次成功结果，直到新设置查询成功。
 - `POST /api/v1/ip-locations/resolve`：已登录用户提交最多 100 个 IP 或 CIDR，查询缓存并尝试入队；请求不等待上游解析。
 
 配置字段和默认值：

@@ -50,7 +50,7 @@ public sealed class PostgreSqlAdapter : ProtocolAdapterBase
                     if (session is not IRawStreamHoneypotSession raw)
                     { await wire.WriteAsync("N"u8.ToArray(), ct); continue; }
                     await wire.WriteAsync("S"u8.ToArray(), ct);
-                    using var certificate = ProtocolTls.CreateServerCertificate(ProtocolFingerprint.HostName(profile));
+                    using var certificate = ProtocolTls.GetServerCertificate(profile);
                     tls = new SslStream(raw.RawStream, true);
                     await tls.AuthenticateAsServerAsync(new SslServerAuthenticationOptions
                     {

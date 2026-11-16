@@ -55,7 +55,7 @@ public sealed class RdpAdapter : ProtocolAdapterBase
                 await sink.AppendAsync(Event(context, "ProtocolViolation", "tls", "unsupported", "TLS stream is unavailable"), token);
                 return;
             }
-            using var certificate = ProtocolTls.CreateServerCertificate(ProtocolFingerprint.HostName(profile));
+            using var certificate = ProtocolTls.GetServerCertificate(profile);
             using var tls = new SslStream(raw.RawStream, leaveInnerStreamOpen: true);
             await tls.AuthenticateAsServerAsync(new SslServerAuthenticationOptions
             {

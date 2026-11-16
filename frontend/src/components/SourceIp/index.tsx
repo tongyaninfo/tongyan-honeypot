@@ -15,16 +15,40 @@ export function locationLabel(result?: IPLocationResult) {
   return fields || result.displayName || statusLabels[result.status];
 }
 
-/** IP 始终立即展示；归属地单独异步补齐，不改变原有跳转和业务加载状态。 */
-export default function SourceIp({ ip, children }: { ip?: string; children?: ReactNode }) {
+function useSourceIpLocation(ip?: string) {
   const value = ip?.trim() ?? '';
   const subscribe = useCallback((listener: () => void) => ipLocationClient.subscribe(value, listener), [value]);
   const snapshot = useCallback(() => ipLocationClient.getSnapshot(value), [value]);
   const result = useSyncExternalStore(subscribe, snapshot, snapshot);
-  if (!value || value === 'unknown') return <>—</>;
+  if (!value || value === 'unknown') return { value, label: undefined };
   const label = value.length > maxIPLocationInputLength ? '无效 IP 地址' : locationLabel(result);
+  return { value, label };
+}
+
+function LocationDescription({ label }: { label: string }) {
+  return (
+    <Typography.Text
+      type="secondary"
+      style={{ fontSize: 12, lineHeight: 1.5, whiteSpace: 'normal', overflowWrap: 'anywhere' }}
+      title={label}
+    >
+      {label}
+    </Typography.Text>
+  );
+}
+
+/** 单独一列展示归属地时，仍与其它管理视图共享解析调度和缓存。 */
+export function SourceIpLocation({ ip }: { ip?: string }) {
+  const { label } = useSourceIpLocation(ip);
+  return label ? <LocationDescription label={label} /> : <>—</>;
+}
+
+/** IP 始终立即展示；归属地单独异步补齐，不改变原有跳转和业务加载状态。 */
+export default function SourceIp({ ip, children }: { ip?: string; children?: ReactNode }) {
+  const { value, label } = useSourceIpLocation(ip);
+  if (!value || value === 'unknown') return <>—</>;
   return <span style={{ display: 'inline-flex', flexDirection: 'column', gap: 2, whiteSpace: 'normal', overflowWrap: 'anywhere', minWidth: 120 }}>
     <span>{children ?? value}</span>
-    <Typography.Text type="secondary" style={{ fontSize: 12, lineHeight: 1.5 }} title={label}>{label}</Typography.Text>
+    {label && <LocationDescription label={label} />}
   </span>;
 }

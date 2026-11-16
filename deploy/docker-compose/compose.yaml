@@ -1,0 +1,30 @@
+# 通研 Honeypot 生产部署模板（Docker Compose v2）
+# 真实环境参数（Harbor 地址、管理台绑定地址、数据目录）通过同目录 .env 注入，不写入仓库。
+# 参考 .env.example；仓库不保存服务器地址、账号或证书。
+services:
+  honeypot:
+    image: ${HONEYPOT_IMAGE:?必须设置 HONEYPOT_IMAGE，例如 <harbor>/honeypot/api:<version>-<buildtime>}
+    container_name: honeypot
+    restart: unless-stopped
+    ports:
+      # 管理台 HTTPS（容器内 5080）。HONEYPOT_WEB_BIND 决定宿主机的绑定地址。
+      - "${HONEYPOT_WEB_BIND:?必须设置 HONEYPOT_WEB_BIND（例如 127.0.0.1 或内网地址）}:18082:5080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      Honeypot__DataDirectory: /app/data
+      TZ: Asia/Shanghai
+    volumes:
+      # 宿主目录必须存在且属主为容器运行用户 app（UID 1654）；SELinux Enforcing 环境下保留 :Z。
+      - ${HONEYPOT_DATA_DIR:-./data}:/app/data:Z
+    healthcheck:
+      # 使用进程内置的回环探针，支持默认自签证书。
+      test: ['CMD', 'dotnet', 'Honeypot.Api.dll', '--probe-management-health']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

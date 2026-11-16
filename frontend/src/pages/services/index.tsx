@@ -21,6 +21,7 @@ import {
   getServiceInstances,
   getServiceTypes,
   normalizePage,
+  setServiceInstanceRestartPolicy,
   startServiceInstance,
   stopServiceInstance,
   type ListenerBinding,
@@ -325,19 +326,26 @@ const ServicesPage: React.FC = () => {
     }
 
     setWorkingId(instance.instanceId);
+    let saved = false;
     try {
-      await createServiceInstance({
-        ...instance,
-        autoStart: checked,
-        bindings: normalizeBindings(instance.bindings),
-      });
+      // 未保存的默认实例先建立配置。普通实例保存不会修改已有实例的重启策略。
+      if (!persistedInstanceIds.has(instance.instanceId)) {
+        const created = await createServiceInstance({ ...instance, bindings: normalizeBindings(instance.bindings) });
+        if (!created.success) throw new Error(created.message || '保存服务实例失败');
+        saved = true;
+      }
+      const result = await setServiceInstanceRestartPolicy(instance.instanceId, checked);
+      saved = true;
+      if (!result.success || result.data?.autoStart !== checked) {
+        throw new Error(result.message || '服务端未确认重启策略已保存');
+      }
       message.success(checked ? '已开启重启自动启动' : '已关闭重启自动启动');
-      await load();
     } catch (toggleError) {
       if (!isRequestError(toggleError)) {
         message.error(toggleError instanceof Error ? toggleError.message : '保存重启策略失败');
       }
     } finally {
+      if (saved) await load();
       setWorkingId(undefined);
     }
   };
@@ -402,6 +410,7 @@ const ServicesPage: React.FC = () => {
                 <Typography.Text type="secondary">
                   连接 {listener?.activeConnections ?? 0} / 已接收 {listener?.acceptedCount ?? 0}
                 </Typography.Text>
+                {(listener?.rejectedCount ?? 0) > 0 && <Tag color="orange">限流拒绝 {listener?.rejectedCount}</Tag>}
                 <Button size="small" onClick={() => removePort(instance, binding.listenerId)}>
                   删除端口
                 </Button>
@@ -411,6 +420,7 @@ const ServicesPage: React.FC = () => {
           <Space wrap>
             <Typography.Text type="secondary">重启自动启动</Typography.Text>
             <Switch
+              aria-label="重启自动启动"
               size="small"
               checked={instance.autoStart === true}
               disabled={workingId === instance.instanceId || hasDraftChanges(instance)}

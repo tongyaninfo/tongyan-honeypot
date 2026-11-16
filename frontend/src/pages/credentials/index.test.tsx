@@ -119,7 +119,7 @@ describe('credential evidence', () => {
     await act(async () => {
       vi.mocked(connectHoneypotRealtime).mock.calls[0][0].onEvent?.();
     });
-    expect(api.getCredentialEvidenceSummaries).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(api.getCredentialEvidenceSummaries).toHaveBeenCalledTimes(2));
     expect(api.getCredentialEvidence).toHaveBeenCalledTimes(2);
   });
 });

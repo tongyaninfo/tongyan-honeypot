@@ -79,7 +79,8 @@ public sealed class SshAdapter : ProtocolAdapterBase
         var clientId = await ReadIdAsync(session, profile.HandshakeTimeout, token);
         if (clientId is null) return;
         if (!clientId.StartsWith("SSH-2.0-", StringComparison.Ordinal) && !clientId.StartsWith("SSH-1.99-", StringComparison.Ordinal)) throw new InvalidDataException();
-        await sink.AppendAsync(Event(context, "HandshakeReceived", "identification", "observed", clientId, 1), token);
+        // SSH 标识含客户端任意文本，仅记录握手步骤。
+        await sink.AppendAsync(Event(context, "HandshakeReceived", "identification", "observed", "SSH client identification received", 1), token);
         var serverKex = BuildKexInit();
         await WritePlainAsync(session, serverKex, token);
         uint clientSequence = 0;

@@ -32,11 +32,12 @@ public sealed class RedisAuthenticationTests
     }
 
     [Theory]
-    [InlineData("AUTH \"a user\" \"a password\"\r\n", "a user", "a password")]
-    [InlineData("AUTH ''\r\n", "default", "")]
-    [InlineData("AUTH 'a\\q' 'p\\q'\r\n", "a\\q", "p\\q")]
-    [InlineData("HELLO 3 AUTH test pass SETNAME isolated\r\n", "test", "pass")]
-    public async Task InlineQuotedAndEmptyPasswordsAreRecorded(string command, string user, string password)
+    [InlineData("AUTH \"a user\" \"a password\"\r\n", "a user", "a password", true)]
+    [InlineData("AUTH ''\r\n", "default", "", false)]
+    [InlineData("AUTH default ''\r\n", "default", "", true)]
+    [InlineData("AUTH 'a\\q' 'p\\q'\r\n", "a\\q", "p\\q", true)]
+    [InlineData("HELLO 3 AUTH test pass SETNAME isolated\r\n", "test", "pass", true)]
+    public async Task InlineQuotedAndEmptyPasswordsAreRecorded(string command, string user, string password, bool usernameProvided)
     {
         var session = new AuthenticationByteSession(Encoding.UTF8.GetBytes(command), 1);
         var sink = new AuthenticationRecordingSink();
@@ -45,6 +46,7 @@ public sealed class RedisAuthenticationTests
         Assert.Equal(user, authentication.Username);
         using var json = JsonDocument.Parse(Assert.Single(sink.Evidence).Content);
         Assert.Equal(password, json.RootElement.GetProperty("password").GetString());
+        Assert.Equal(usernameProvided, json.RootElement.GetProperty("usernameProvided").GetBoolean());
         Assert.Contains(session.Writes, x => Encoding.UTF8.GetString(x).StartsWith("-WRONGPASS", StringComparison.Ordinal));
     }
 

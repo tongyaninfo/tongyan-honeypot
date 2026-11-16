@@ -1,5 +1,6 @@
 using Honeypot.Protocol.Abstractions.Service;
-using Honeypot.Runtime.Service.impl;
+using Honeypot.Runtime.Options;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace Honeypot.Runtime.Service;
@@ -13,6 +14,11 @@ public static class RuntimeServiceCollectionExtensions
     {
         services.AddSingleton<IProtocolAdapterRegistry, ProtocolAdapterRegistry>();
         services.AddSingleton<IConnectionIdGenerator, ConnectionIdGenerator>();
+        services.AddOptions<ConnectionAdmissionOptions>()
+            .Configure<IServiceProvider>((options, provider) => provider.GetService<IConfiguration>()?
+                .GetSection(ConnectionAdmissionOptions.SectionName).Bind(options))
+            .Validate(options => options.IsValid(), "Honeypot:ConnectionAdmission 配置无效。")
+            .ValidateOnStart();
         services.AddSingleton<IListenerHost, TcpListenerHost>();
         return services;
     }

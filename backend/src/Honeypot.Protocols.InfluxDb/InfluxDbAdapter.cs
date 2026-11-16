@@ -36,11 +36,13 @@ public sealed class InfluxDbAdapter : HttpDatabaseAdapterBase
         var header = HeaderAuthentication(request, basicIsToken: v2 && request.Path != "/api/v2/signin");
         if (header is not null) return header;
         var query = QueryParameters(request.Target);
-        if (!query.TryGetValue("u", out var user) && !query.ContainsKey("p")) return null;
-        var password = query.GetValueOrDefault("p", "");
+        // 存证保留原有认证行为，同时区分未传 p 与实际提交空密码。
+        var passwordProvided = query.TryGetValue("p", out var password);
+        if (!query.TryGetValue("u", out var user) && !passwordProvided) return null;
+        password ??= "";
         return v2
             ? new(user, "HTTP-Query-Token", "Token", JsonSerializer.SerializeToUtf8Bytes(new { username = user, token = password }))
-            : new(user, "HTTP-Query", "Plaintext", JsonSerializer.SerializeToUtf8Bytes(new { username = user, password }));
+            : new(user, "HTTP-Query", "Plaintext", JsonSerializer.SerializeToUtf8Bytes(new { username = user, password, passwordProvided }));
     }
 
     protected override ProtocolHttpResponse Response(ProtocolHttpRequest request, ServiceProfile profile, bool attempted)

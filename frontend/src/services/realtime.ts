@@ -4,13 +4,17 @@ import {
   LogLevel,
   type HubConnection,
 } from '@microsoft/signalr';
+import type { ApiResult, InteractionEvent } from './honeypot/api';
 import { getAccessToken } from './identity';
 import { reportFrontendDiagnostic } from './frontendDiagnostics';
+
+export type AcceptedConnectionNotice = Pick<InteractionEvent, 'connectionId' | 'occurredAtUtc'>;
 
 export interface HoneypotRealtimeHandlers {
   onEvent?: () => void;
   onRuntime?: () => void;
   onConnectionState?: (state: HubConnectionState) => void;
+  onConnectionAccepted?: (event: AcceptedConnectionNotice) => void;
 }
 
 /**
@@ -42,7 +46,14 @@ export async function connectHoneypotRealtime(
     callback?.();
   };
 
-  connection.on('eventAppended', () => notify(handlers.onEvent));
+  connection.on('eventAppended', (message?: ApiResult<InteractionEvent>) => {
+    notify(handlers.onEvent);
+    const event = message?.success ? message.data : undefined;
+    if (event?.eventType === 'ConnectionAccepted' &&
+        typeof event.connectionId === 'string' && typeof event.occurredAtUtc === 'string') {
+      handlers.onConnectionAccepted?.({ connectionId: event.connectionId, occurredAtUtc: event.occurredAtUtc });
+    }
+  });
   connection.on('runtimeChanged', () => notify(handlers.onRuntime));
   let stopping = false;
   connection.onreconnecting(() => {
@@ -62,7 +73,11 @@ export async function connectHoneypotRealtime(
   });
 
   try { await connection.start(); }
-  catch (error) { reportFrontendDiagnostic('UI_REALTIME_INTERRUPTED'); throw error; }
+  catch (error) {
+    reportFrontendDiagnostic('UI_REALTIME_INTERRUPTED');
+    handlers.onConnectionState?.(HubConnectionState.Disconnected);
+    throw error;
+  }
   handlers.onConnectionState?.(connection.state);
 
   return async () => {

@@ -2,10 +2,12 @@ using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
 using System.Security.Authentication;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using Honeypot.Protocol.Abstractions.Models;
 using Honeypot.Protocol.Abstractions.Service;
 using Honeypot.Runtime.Service;
+using Honeypot.Runtime.Options;
 using Honeypot.Protocols.Mongo;
 using Honeypot.Protocols.MySql;
 using Honeypot.Protocols.Rdp;
@@ -14,6 +16,7 @@ using Honeypot.Protocols.Ssh;
 using Honeypot.Api.Service.impl;
 using Honeypot.Engine.Service.impl;
 using Microsoft.Extensions.Logging.Abstractions;
+using OptionsFactory = Microsoft.Extensions.Options.Options;
 using Xunit;
 
 namespace Honeypot.Runtime.Tests;
@@ -77,6 +80,155 @@ public sealed class RuntimeTests
         Assert.Equal(port, accepted.DestinationPort);
         Assert.Equal("ssh-test-1", accepted.ListenerId);
         Assert.Equal("ssh-test", accepted.ServiceInstanceId);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SharedConcurrencyRejectsBeforeWritingAnEvent(bool perSource)
+    {
+        var registry = new ProtocolAdapterRegistry();
+        registry.Register(new NoopAdapter("ssh"));
+        var sink = new PausedAcceptedSink();
+        var options = new ConnectionAdmissionOptions
+        {
+            MaxConcurrentConnections = perSource ? 10 : 1,
+            MaxConcurrentConnectionsPerSource = perSource ? 1 : 10,
+        };
+        await using var host = new TcpListenerHost(registry, sink, new ConnectionIdGenerator(),
+            NullLogger<TcpListenerHost>.Instance, OptionsFactory.Create(options));
+
+        var firstPort = GetFreePort();
+        Assert.True((await host.ApplyAsync(CreateInstance("first", firstPort))).Succeeded);
+        var secondPort = GetFreePort();
+        Assert.True((await host.ApplyAsync(CreateInstance("second", secondPort))).Succeeded);
+        using var first = new TcpClient();
+        await first.ConnectAsync(IPAddress.Loopback, firstPort);
+        await sink.Entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        using var second = new TcpClient();
+        await second.ConnectAsync(IPAddress.Loopback, secondPort);
+        await WaitUntilAsync(() => host.GetStatuses().Any(item => item.Port == secondPort && item.RejectedCount == 1));
+        Assert.Equal(1, sink.WriteCount);
+        var active = Assert.Single(host.GetActiveConnections());
+        Assert.Equal(firstPort, active.DestinationPort);
+        Assert.Equal("ssh", active.AdapterKey);
+        Assert.Equal(IPAddress.Loopback.ToString(), active.SourceIp);
+        Assert.Equal(((IPEndPoint)first.Client.LocalEndPoint!).Port, active.SourcePort);
+
+        sink.Release.TrySetResult();
+        await WaitUntilAsync(() => host.GetStatuses().All(item => item.ActiveConnections == 0));
+        Assert.Empty(host.GetActiveConnections());
+        Assert.Equal((await sink.Closed.Task).ConnectionId, active.ConnectionId);
+        using var subsequent = new TcpClient();
+        await subsequent.ConnectAsync(IPAddress.Loopback, secondPort);
+        await WaitUntilAsync(() => sink.WriteCount == 4);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task CompletedSessionsCountAgainstTheSharedRateUntilTheWindowResets(bool perSource)
+    {
+        var registry = new ProtocolAdapterRegistry();
+        registry.Register(new NoopAdapter("ssh"));
+        var sink = new InMemoryInteractionEventSink();
+        var clock = new AdmissionClock();
+        var options = new ConnectionAdmissionOptions
+        {
+            MaxNewConnectionsPerSecond = perSource ? 10 : 1,
+            MaxNewConnectionsPerSourcePerSecond = perSource ? 1 : 10,
+        };
+        await using var host = new TcpListenerHost(registry, sink, new ConnectionIdGenerator(),
+            NullLogger<TcpListenerHost>.Instance, OptionsFactory.Create(options), clock);
+
+        var firstPort = GetFreePort();
+        Assert.True((await host.ApplyAsync(CreateInstance("first", firstPort))).Succeeded);
+        var secondPort = GetFreePort();
+        Assert.True((await host.ApplyAsync(CreateInstance("second", secondPort))).Succeeded);
+        using var first = new TcpClient();
+        await first.ConnectAsync(IPAddress.Loopback, firstPort);
+        await WaitUntilAsync(() => sink.Events.Count == 2 && host.GetStatuses().All(item => item.ActiveConnections == 0));
+
+        using var second = new TcpClient();
+        await second.ConnectAsync(IPAddress.Loopback, secondPort);
+        await WaitUntilAsync(() => host.GetStatuses().Any(item => item.Port == secondPort && item.RejectedCount == 1));
+        Assert.Equal(2, sink.Events.Count);
+
+        clock.AdvanceOneSecond();
+        using var subsequent = new TcpClient();
+        await subsequent.ConnectAsync(IPAddress.Loopback, secondPort);
+        await WaitUntilAsync(() => sink.Events.Count == 4);
+    }
+
+    [Fact]
+    public async Task ConnectionEventDeadlineClosesSessionAsStorageDegraded()
+    {
+        var registry = new ProtocolAdapterRegistry();
+        registry.Register(new NoopAdapter("ssh"));
+        var sink = new PausedAcceptedSink();
+        await using var host = new TcpListenerHost(registry, sink, new ConnectionIdGenerator(),
+            NullLogger<TcpListenerHost>.Instance, OptionsFactory.Create(new ConnectionAdmissionOptions { AcceptedEventTimeoutSeconds = 1 }));
+        var port = GetFreePort();
+        Assert.True((await host.ApplyAsync(CreateInstance("storage-timeout", port))).Succeeded);
+
+        using var client = new TcpClient();
+        await client.ConnectAsync(IPAddress.Loopback, port);
+        var closed = await sink.Closed.Task.WaitAsync(TimeSpan.FromSeconds(3));
+
+        Assert.Equal(SessionCloseReason.StorageDegraded, closed.CloseReason);
+        Assert.Equal("storage_failed", closed.Outcome);
+        Assert.Equal(1, Assert.Single(host.GetStatuses()).EventWriteFailureCount);
+        await WaitUntilAsync(() => Assert.Single(host.GetStatuses()).ActiveConnections == 0);
+        Assert.Empty(host.GetActiveConnections());
+    }
+
+    [Fact]
+    public void ProtocolCertificatesReuseTheSameSyntheticIdentityAfterDisposalOfAPriorHandle()
+    {
+        var profile = new ServiceProfile
+        {
+            ProfileId = "test-certificate", AdapterKey = "mysql", AdvertisedHostName = "simulated-db.example.test",
+        };
+        string fingerprint;
+        using (var first = ProtocolTls.GetServerCertificate(profile)) fingerprint = first.Thumbprint;
+        using var second = ProtocolTls.GetServerCertificate(profile);
+        using var different = ProtocolTls.GetServerCertificate(profile with { AdvertisedHostName = "another.example.test" });
+
+        Assert.True(second.HasPrivateKey);
+        Assert.Equal(fingerprint, second.Thumbprint);
+        Assert.Equal("simulated-db.example.test", second.GetNameInfo(X509NameType.DnsName, false));
+        Assert.NotEqual(second.Thumbprint, different.Thumbprint);
+    }
+
+    [Fact]
+    public async Task RuntimeReplacesAnAccidentallyConfiguredLocalIdentity()
+    {
+        var registry = new ProtocolAdapterRegistry();
+        var adapter = new RecordingProfileAdapter();
+        registry.Register(adapter);
+        await using var host = new TcpListenerHost(registry, new InMemoryInteractionEventSink(), new ConnectionIdGenerator(),
+            NullLogger<TcpListenerHost>.Instance);
+
+        var port = GetFreePort();
+        var instance = CreateInstance("host-identity", port, "mssql");
+        var defaults = ServiceAdapterDefaults.For("mssql");
+        Assert.True((await host.ApplyAsync(instance with
+        {
+            Profile = instance.Profile with
+            {
+                AdvertisedHostName = " " + Environment.MachineName + ". ",
+                AdvertisedProduct = Environment.MachineName,
+                AdvertisedVersion = "1.2.3",
+            },
+        })).Succeeded);
+        using var client = new TcpClient();
+        await client.ConnectAsync(IPAddress.Loopback, port);
+        var advertised = await adapter.Observed.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.Equal(defaults.HostName, ProtocolFingerprint.HostName(advertised));
+        Assert.Equal(defaults.Product, ProtocolFingerprint.Product(advertised));
+        Assert.Equal("1.2.3", ProtocolFingerprint.Version(advertised));
     }
 
     [Fact]
@@ -551,6 +703,40 @@ public sealed class RuntimeTests
         return ((IPEndPoint)listener.LocalEndpoint).Port;
     }
 
+    private static async Task WaitUntilAsync(Func<bool> condition)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        while (!condition()) await Task.Delay(10, timeout.Token);
+    }
+
+    private sealed class AdmissionClock : TimeProvider
+    {
+        private long _timestamp;
+        public override long GetTimestamp() => Volatile.Read(ref _timestamp);
+        public void AdvanceOneSecond() => Interlocked.Add(ref _timestamp, TimestampFrequency);
+    }
+
+    private sealed class PausedAcceptedSink : IInteractionEventSink
+    {
+        private int _writeCount;
+        public int WriteCount => Volatile.Read(ref _writeCount);
+        public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<InteractionEvent> Closed { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async ValueTask<EventAppendResult> AppendAsync(InteractionEvent item, CancellationToken cancellationToken = default)
+        {
+            Interlocked.Increment(ref _writeCount);
+            if (item.EventType == "ConnectionAccepted")
+            {
+                Entered.TrySetResult();
+                await Release.Task.WaitAsync(cancellationToken);
+            }
+            if (item.EventType == "SessionClosed") Closed.TrySetResult(item);
+            return EventAppendResult.Accepted();
+        }
+    }
+
     private static ServiceInstance CreateInstance(string instanceId, int port, string adapterKey = "ssh") => new()
     {
         InstanceId = instanceId,
@@ -600,6 +786,19 @@ public sealed class RuntimeTests
             CancellationToken cancellationToken = default)
         {
             await session.CloseAsync(SessionCloseReason.AdapterCompleted, cancellationToken);
+        }
+    }
+
+    private sealed class RecordingProfileAdapter : ProtocolAdapterBase
+    {
+        public TaskCompletionSource<ServiceProfile> Observed { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public override ServiceAdapterDescriptor Descriptor { get; } = new() { AdapterKey = "mssql", DisplayName = "test" };
+
+        public override ValueTask HandleAsync(IHoneypotSession session, ProtocolSessionContext context, ServiceProfile profile,
+            IInteractionEventSink eventSink, CancellationToken cancellationToken = default)
+        {
+            Observed.TrySetResult(profile);
+            return ValueTask.CompletedTask;
         }
     }
 }

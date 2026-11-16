@@ -4,7 +4,7 @@ using Microsoft.EntityFrameworkCore;
 namespace Honeypot.Api.Data;
 
 /// <summary>
-/// Honeypot 本地配置、报告元数据与邮件任务数据库，不保存认证证据原文。
+/// 单机配置、采集、报告与审计库。认证材料以独立的加密证据保存。
 /// </summary>
 public sealed class HoneypotDbContext : DbContext
 {

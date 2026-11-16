@@ -1,11 +1,11 @@
 import { useIntl } from '@umijs/max';
 import { Alert, Card, Empty, Spin, Table, Tag, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import ExcelExportButton from '@/components/ExcelExportButton';
 import SourceIp from '@/components/SourceIp';
-import { getThreats, normalizePage, type ThreatIpProfile } from '@/services/honeypot/api';
-import { connectHoneypotRealtime } from '@/services/realtime';
+import { getThreats, loadExportRows, normalizePage, type PageResult, type ThreatIpProfile } from '@/services/honeypot/api';
+import { useRealtimeRefresh } from '@/hooks/useRealtimeRefresh';
 
 const statusColors: Record<string, string> = {
   New: 'default',
@@ -26,39 +26,35 @@ const ThreatsPage: React.FC = () => {
   const t = (id: string) => intl.formatMessage({ id: `threats.${id}` });
   const statusLabel = (status: string) => t(`status.${statusKey(status)}`);
   const timeLabel = (value: string) => new Date(value).toLocaleString(intl.locale, { timeZone: 'Asia/Shanghai' });
-  const [rows, setRows] = useState<ThreatIpProfile[]>([]);
+  const [snapshot, setSnapshot] = useState<PageResult<ThreatIpProfile>>(() => normalizePage(undefined));
+  const { items: rows, total } = snapshot;
+  const [page, setPage] = useState(1);
+  const requestId = useRef(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
 
   const load = useCallback(async () => {
+    const id = ++requestId.current;
     setLoading(true);
     try {
-      const response = await getThreats();
-      setRows(normalizePage(response.data).items);
+      const response = await getThreats({ page, pageSize: 20 });
+      if (requestId.current !== id) return;
+      const result = normalizePage(response.data);
+      if (page > 1 && result.items.length === 0) setPage(Math.max(1, Math.ceil(result.total / 20)));
+      setSnapshot(result);
       setError(undefined);
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : '');
+      if (requestId.current === id) setError(loadError instanceof Error ? loadError.message : '');
     } finally {
-      setLoading(false);
+      if (requestId.current === id) setLoading(false);
     }
-  }, []);
+  }, [page]);
 
   useEffect(() => {
     void load();
-    let cleanup: (() => Promise<void>) | undefined;
-    void connectHoneypotRealtime({
-      onEvent: () => void load(),
-    })
-      .then((dispose) => {
-        cleanup = dispose;
-      })
-      .catch(() => {
-        // 实时通道不可用时仍保留 REST 查询。
-      });
-    return () => {
-      void cleanup?.();
-    };
+    return () => { requestId.current++; };
   }, [load]);
+  useRealtimeRefresh(load);
 
   const columns = [
     { title: t('sourceIp'), dataIndex: 'sourceIp', width: 180, render: (value: string) => <SourceIp ip={value} /> },
@@ -87,7 +83,9 @@ const ThreatsPage: React.FC = () => {
             t('threatId'), t('firstSeenUtc'), t('lastEventId'), t('scoreVersion'),
             t('sessionCount'), t('protocolViolationCount'), t('expiresAtUtc'),
           ]}
-          rows={() => rows.map((row) => [
+          prepare={async () => {
+            const items = await loadExportRows(getThreats, (row) => row.threatId, snapshot);
+            return { additionalSheets: [], rows: items.map((row) => [
             row.sourceIp,
             statusLabel(row.status),
             row.currentScore,
@@ -105,11 +103,12 @@ const ThreatsPage: React.FC = () => {
             row.sessionCount,
             row.protocolViolationCount,
             row.expiresAtUtc ? timeLabel(row.expiresAtUtc) : undefined,
-          ])}
+            ]) };
+          }}
           disabled={loading || error !== undefined || rows.length === 0}
         />
       }>
-        {loading ? <Spin /> : rows.length === 0 ? <Empty description={t('empty')} /> : <Table rowKey="threatId" dataSource={rows} columns={columns} pagination={{ pageSize: 20 }} scroll={{ x: 1250 }} />}
+        {loading && rows.length === 0 ? <Spin /> : rows.length === 0 ? <Empty description={t('empty')} /> : <Table rowKey="threatId" loading={loading} dataSource={rows} columns={columns} pagination={{ current: page, pageSize: 20, total, showSizeChanger: false, onChange: setPage }} scroll={{ x: 1250 }} />}
       </Card>
     </div>
   );

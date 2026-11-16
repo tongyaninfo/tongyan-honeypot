@@ -2,6 +2,16 @@ import base from '../en-US/events';
 
 export default {
   ...base,
+  'passwordBook.account': 'Akun',
+  'passwordBook.service': 'Layanan',
+  'passwordBook.authCount': 'Percobaan autentikasi',
+  'passwordBook.lastUsed': 'Terakhir digunakan',
+  'passwordBook.loadingPassword': 'Memuat…',
+  'passwordBook.emptyPassword': '(kata sandi kosong)',
+  'passwordBook.unavailablePassword': 'Bukti tidak tersedia atau kedaluwarsa',
+  'passwordBook.empty': 'Belum ada kata sandi yang tercatat',
+  'passwordBook.unavailable': 'Buku kata sandi tidak tersedia',
+  'passwordBook.adminOnly': 'Hanya administrator yang dapat mengakses buku kata sandi.',
   'events.type.AuthorizationDenied': 'Akses ditolak',
   'credentials.password': 'Kata sandi',
   'credentials.passwordNotCaptured': 'Kata sandi teks biasa tidak terekam',

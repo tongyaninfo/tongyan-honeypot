@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace Honeypot.Protocol.Abstractions.Models;
 
 /// <summary>
@@ -21,10 +23,13 @@ public sealed record InteractionEvent
     public required string ProfileId { get; init; }
     public string Stage { get; init; } = "accepted";
     public string Outcome { get; init; } = "recorded";
+    /// <summary>适配器给协议异常分配的固定诊断码。</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ProtocolErrorCode { get; init; }
     public string? PayloadSummary { get; init; }
     public string? Username { get; init; }
     // 保留旧代码的源兼容性，但永不通过 HTTP/SignalR 序列化密码。
-    [System.Text.Json.Serialization.JsonIgnore]
+    [JsonIgnore]
     public string? Password { get; init; }
     public string? Domain { get; init; }
     public string? Database { get; init; }

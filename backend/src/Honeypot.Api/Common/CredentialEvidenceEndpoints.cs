@@ -17,8 +17,9 @@ public static class CredentialEvidenceEndpoints
     {
         const string prefix = "/api/v1/credential-evidence/";
         var path = context.Request.Path.Value ?? string.Empty;
+        if (path.EndsWith('/')) path = path[..^1];
         if (!path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return;
-        if (HttpMethods.IsPost(context.Request.Method) && path.TrimEnd('/').Equals(ExportPath, StringComparison.OrdinalIgnoreCase))
+        if (HttpMethods.IsPost(context.Request.Method) && path.Equals(ExportPath, StringComparison.OrdinalIgnoreCase))
         {
             context.Response.Headers.CacheControl = "no-store";
             context.RequestServices.GetRequiredService<ICredentialEvidenceAccessService>().AuditExportDenied(null);
@@ -26,7 +27,8 @@ public static class CredentialEvidenceEndpoints
         }
 
         var artifact = path[prefix.Length..];
-        if (artifact.Length == 0 || artifact.Contains('/') || artifact.Equals("audit", StringComparison.OrdinalIgnoreCase)) return;
+        if (!HttpMethods.IsGet(context.Request.Method) || !IsEvidenceId(artifact)) return;
+        context.Response.Headers.CacheControl = "no-store";
         context.RequestServices.GetRequiredService<ICredentialEvidenceAccessService>().Read(artifact, null);
     }
 
@@ -34,14 +36,13 @@ public static class CredentialEvidenceEndpoints
     {
         endpoints.MapPost(ExportPath, ExportAsync);
 
-        endpoints.MapGet("/api/v1/credential-evidence", (HttpContext context, ICredentialEvidenceStore store) =>
+        endpoints.MapGet("/api/v1/credential-evidence", (HttpContext context, ICredentialEvidenceStore store, int? page, int? pageSize) =>
         {
             if (context.Items["CurrentUser"] is not AuthenticatedUser)
                 return Results.Json(ApiResult<object>.Fail("UNAUTHORIZED", "请先登录。"), statusCode: 401);
             // 列表只返回可关联的元数据，不返回密码或认证材料。
-            var items = store.GetAll();
             context.Response.Headers.CacheControl = "no-store";
-            return Results.Ok(ApiResult<object>.Ok(new { items, total = items.Count, page = 1, pageSize = items.Count }));
+            return Results.Ok(ApiResult<QueryPageResult<CredentialEvidenceSummary>>.Ok(store.GetPage(page, pageSize)));
         });
 
         endpoints.MapGet("/api/v1/credential-evidence/audit", (HttpContext context, ICredentialEvidenceAccessService access) =>
@@ -112,7 +113,7 @@ public static class CredentialEvidenceEndpoints
         return Results.Ok(ApiResult<object>.Ok(new { items }));
     }
 
-    private static bool IsEvidenceId(string? id) => id is { Length: 37 } &&
+    internal static bool IsEvidenceId(string? id) => id is { Length: 37 } &&
         id.StartsWith("cred-", StringComparison.OrdinalIgnoreCase) && Guid.TryParseExact(id.AsSpan(5), "N", out _);
 
     private static IResult InvalidExportRequest() => Results.BadRequest(

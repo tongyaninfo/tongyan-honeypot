@@ -8,11 +8,12 @@ describe('Honeypot frontend baseline', () => {
     expect(defaultSettings.logo).toBe('/assets/brand/tyinfo-logo-horizontal.png');
   });
 
-  it('exposes reports and keeps system notification management administrator-only', () => {
+  it('exposes reports and keeps the password book and system settings administrator-only', () => {
     const paths = routes.map((route) => route.path);
 
-    expect(paths).toEqual(['/user', '/setup', '/overview', '/services', '/reports', '/sensors', '/events', '/threats', '/credentials', '/system', '/', '/*']);
+    expect(paths).toEqual(['/user', '/setup', '/overview', '/services', '/reports', '/sensors', '/events', '/threats', '/credentials', '/password-book', '/system', '/', '/*']);
     expect(routes.find((route) => route.path === '/reports')?.access).toBeUndefined();
+    expect(routes.find((route) => route.path === '/password-book')).toMatchObject({ name: 'passwordBook', access: 'canAdmin' });
     const system = routes.find((route) => route.path === '/system');
     expect(system?.access).toBe('canAdmin');
     expect(system?.routes?.find((route) => route.path === '/system/ip-location')).toMatchObject({ access: 'canAdmin' });

@@ -1,11 +1,14 @@
 using System.Diagnostics;
 using Honeypot.Api.Data;
 using Honeypot.Api.Data.Models;
+using Honeypot.Api.Options;
 using Honeypot.Api.Service;
 using Honeypot.Api.Service.impl;
 using Honeypot.Protocol.Abstractions.Service;
 using Honeypot.Shared.Models;
+using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 
 namespace Honeypot.Api.Workers;
 
@@ -18,6 +21,8 @@ public sealed class ReportRuntimeSamplerWorker(
     TimeProvider time,
     IConfiguration configuration,
     IHostEnvironment environment,
+    IOptions<EventStorageOptions> options,
+    ReportEventDiskBudget diskBudget,
     ILogger<ReportRuntimeSamplerWorker> logger,
     ISyslogPublisher? logs = null) : BackgroundService
 {
@@ -53,7 +58,7 @@ public sealed class ReportRuntimeSamplerWorker(
                     CoverageStartAtUnixMs = previousSample is { } previous && now > previous && now - previous <= 60_000 && failures == 0 ? previous : now,
                     ProcessCpuPercent = elapsedMs > 0 && previousCpuMs is { } cpu ? Math.Clamp(100d * (cpuMs - cpu) / elapsedMs / Environment.ProcessorCount, 0, 100) : null,
                     ProcessMemoryBytes = process.WorkingSet64,
-                    DataDiskFreeBytes = ReadDiskFreeBytes(directory),
+                    DataDiskFreeBytes = ReportEventDiskBudget.ReadDiskFreeBytes(directory),
                     ActiveConnections = statuses.Sum(item => (long)item.ActiveConnections),
                     // 仅期望运行的监听器计入正常采样分母，主动停止不算故障。
                     ConfiguredListeners = expected.Count,
@@ -62,6 +67,16 @@ public sealed class ReportRuntimeSamplerWorker(
                     PersistenceFailures = failures,
                 };
                 await using var db = await factory.CreateDbContextAsync(stoppingToken);
+                db.Database.SetCommandTimeout(2);
+                await db.Database.OpenConnectionAsync(stoppingToken);
+                if (!await diskBudget.CanWriteAsync(db, options.Value, health, stoppingToken))
+                {
+                    previousSample = null;
+                    previousCpuMs = null;
+                    previousTimestamp = null;
+                    health.RecordFailure();
+                    continue;
+                }
                 db.Set<ReportRuntimeSampleEntity>().Add(sample);
                 await db.SaveChangesAsync(stoppingToken);
                 if (consecutiveFailures >= 3)
@@ -73,12 +88,14 @@ public sealed class ReportRuntimeSamplerWorker(
                 previousTimestamp = timestamp;
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
-            catch (Exception)
+            catch (Exception error)
             {
                 previousSample = null;
                 previousCpuMs = null;
                 previousTimestamp = null;
                 health.RecordFailure();
+                if ((error is DbUpdateException ? error.InnerException : error) is SqliteException { SqliteErrorCode: 13 })
+                    health.SetDiskBudgetBlocked(true);
                 consecutiveFailures++;
                 if (consecutiveFailures == 1) logger.LogWarning("Report runtime sampling failed; the interval remains unknown.");
                 if (consecutiveFailures == 3)
@@ -87,18 +104,4 @@ public sealed class ReportRuntimeSamplerWorker(
         } while (await timer.WaitForNextTickAsync(stoppingToken));
     }
 
-    private static long? ReadDiskFreeBytes(string directory)
-    {
-        try
-        {
-            var path = Path.GetFullPath(directory);
-            return DriveInfo.GetDrives().Where(drive => drive.IsReady &&
-                    (path == drive.RootDirectory.FullName || path.StartsWith(drive.RootDirectory.FullName.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.Ordinal)))
-                .OrderByDescending(drive => drive.RootDirectory.FullName.Length).FirstOrDefault()?.AvailableFreeSpace;
-        }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or System.Security.SecurityException)
-        {
-            return null;
-        }
-    }
 }

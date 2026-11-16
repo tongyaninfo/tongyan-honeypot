@@ -1,3 +1,4 @@
+using System.Threading.Channels;
 using Honeypot.Api.Models;
 using Honeypot.Api.Realtime;
 using Honeypot.Protocol.Abstractions.Models;
@@ -9,11 +10,14 @@ namespace Honeypot.Api.Service.impl;
 /// <summary>
 /// SignalR 广播实现。所有消息均包裹 ApiResult，且事件使用安全视图，不把密码原文推给前端。
 /// </summary>
-public sealed class SignalRRealtimeUpdateNotifier : IRealtimeUpdateNotifier
+public sealed class SignalRRealtimeUpdateNotifier : BackgroundService, IRealtimeUpdateNotifier
 {
     private readonly IHubContext<HoneypotHub> _hubContext;
     private readonly ILogger<SignalRRealtimeUpdateNotifier> _logger;
     private readonly ISyslogPublisher? _logs;
+    // 实时消息是查询提示，慢客户端不能阻塞公网会话或无限累积待发送事件。
+    private readonly Channel<RealtimeInteractionEvent> _events = Channel.CreateBounded<RealtimeInteractionEvent>(
+        new BoundedChannelOptions(64) { SingleReader = true, FullMode = BoundedChannelFullMode.DropOldest });
     private int _consecutiveFailures;
 
     public SignalRRealtimeUpdateNotifier(
@@ -30,10 +34,19 @@ public sealed class SignalRRealtimeUpdateNotifier : IRealtimeUpdateNotifier
         InteractionEvent interactionEvent,
         CancellationToken cancellationToken = default)
     {
-        var payload = ApiResult<RealtimeInteractionEvent>.Ok(
-            RealtimeInteractionEvent.From(interactionEvent),
-            "event appended");
-        return SendSafelyAsync("eventAppended", payload, cancellationToken);
+        if (!cancellationToken.IsCancellationRequested)
+            _events.Writer.TryWrite(RealtimeInteractionEvent.From(interactionEvent));
+        return Task.CompletedTask;
+    }
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        await foreach (var item in _events.Reader.ReadAllAsync(stoppingToken))
+        {
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+            deadline.CancelAfter(TimeSpan.FromSeconds(2));
+            await SendSafelyAsync("eventAppended", ApiResult<RealtimeInteractionEvent>.Ok(item, "event appended"), deadline.Token);
+        }
     }
 
     public Task PublishRuntimeAsync(

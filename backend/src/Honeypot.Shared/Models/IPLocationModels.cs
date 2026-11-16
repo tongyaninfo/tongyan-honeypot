@@ -14,7 +14,8 @@ public sealed record IPLocationSettings
 /// <summary>归属地只使用供应方实际返回的字段，不根据语言或地址猜测行政区。</summary>
 public sealed record IPLocationResult(
     string Ip, string Status, string DisplayName = "", string Country = "", string Province = "",
-    string City = "", string District = "", string Isp = "");
+    string City = "", string District = "", string Isp = "", double? Latitude = null, double? Longitude = null,
+    string? Source = null, string? Version = null);
 
 public sealed record IPLocationBatchRequest(string?[]? Ips);
 public sealed record IPLocationBatchResult(bool Enabled, IReadOnlyList<IPLocationResult> Items);

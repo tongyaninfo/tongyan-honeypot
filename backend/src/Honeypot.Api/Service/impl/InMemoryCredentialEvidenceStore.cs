@@ -1,8 +1,8 @@
-using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using Honeypot.Api.Models;
 using Honeypot.Api.Common;
+using Honeypot.Protocol.Abstractions.Models;
 using Honeypot.Shared.Models;
 
 namespace Honeypot.Api.Service.impl;
@@ -13,9 +13,26 @@ namespace Honeypot.Api.Service.impl;
 /// </summary>
 public sealed class InMemoryCredentialEvidenceStore : ICredentialEvidenceStore, IDisposable
 {
-    private sealed record StoredEvidence(CredentialEvidenceSummary Summary, byte[] Nonce, byte[] Tag, byte[] Ciphertext);
+    private sealed record StoredEvidence(CredentialEvidenceSummary Summary, byte[] Nonce, byte[] Tag, byte[] Ciphertext,
+        PasswordBookProjection.Candidate? Candidate)
+    {
+        public PasswordBookAttempt? ConfirmedAttempt { get; set; }
+    }
+
+    private sealed record PasswordBookAttempt(string Username, string AdapterKey, DateTimeOffset OccurredAtUtc, string ArtifactId);
+
+    private static readonly IComparer<PasswordBookAttempt> MostRecentFirst = Comparer<PasswordBookAttempt>.Create((first, second) =>
+    {
+        var byTime = second!.OccurredAtUtc.CompareTo(first!.OccurredAtUtc);
+        return byTime != 0 ? byTime : StringComparer.Ordinal.Compare(first.ArtifactId, second.ArtifactId);
+    });
+
     private readonly byte[] _encryptionKey = RandomNumberGenerator.GetBytes(32);
-    private readonly ConcurrentDictionary<string, StoredEvidence> _items = new(StringComparer.OrdinalIgnoreCase);
+    private readonly byte[] _passwordBookKey = RandomNumberGenerator.GetBytes(32);
+    private readonly Dictionary<string, StoredEvidence> _items = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, SortedSet<PasswordBookAttempt>> _passwordBookGroups = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _confirmedEventIds = new(StringComparer.OrdinalIgnoreCase);
+    private readonly PriorityQueue<string, DateTimeOffset> _expirations = new();
     private readonly TimeProvider _clock;
     private readonly ISyslogPublisher? _syslog;
     private readonly ITimer _expirationTimer;
@@ -36,26 +53,34 @@ public sealed class InMemoryCredentialEvidenceStore : ICredentialEvidenceStore, 
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (retentionDays is < 1 or > 3650) throw new ArgumentOutOfRangeException(nameof(retentionDays));
-        var plaintext = Encoding.UTF8.GetBytes(content);
+        var byteCount = Encoding.UTF8.GetByteCount(content);
         try
         {
             lock (_gate)
             {
                 ObjectDisposedException.ThrowIf(_disposed, this);
-                PurgeExpired();
-                if (_items.Count >= 10000 || plaintext.Length > 4 * 1024 * 1024 || _storedBytes + plaintext.Length > MaxStoredBytes)
+                var capturedAt = _clock.GetUtcNow();
+                PurgeExpiredLocked(capturedAt);
+                if (byteCount > 4 * 1024 * 1024 || _storedBytes + byteCount > MaxStoredBytes)
                     throw new InvalidOperationException("CREDENTIAL_STORE_CAPACITY_EXCEEDED");
                 var artifactId = $"cred-{Guid.NewGuid():N}";
-                var capturedAt = _clock.GetUtcNow();
                 var summary = new CredentialEvidenceSummary(artifactId, connectionId, eventId, sourceIp, adapterKey,
                     materialType, capturedAt, capturedAt.AddDays(retentionDays), false);
                 var nonce = RandomNumberGenerator.GetBytes(12);
-                var ciphertext = new byte[plaintext.Length];
+                var ciphertext = new byte[byteCount];
                 var tag = new byte[16];
                 using var aes = new AesGcm(_encryptionKey, tag.Length);
                 // 关联元数据同时参加认证，避免密文被错误关联到其它事件。
-                aes.Encrypt(nonce, plaintext, ciphertext, tag, AssociatedData(summary));
-                _items[artifactId] = new(summary, nonce, tag, ciphertext);
+                var plaintext = Encoding.UTF8.GetBytes(content);
+                PasswordBookProjection.Candidate? candidate;
+                try
+                {
+                    aes.Encrypt(nonce, plaintext, ciphertext, tag, AssociatedData(summary));
+                    candidate = PasswordBookProjection.ReadCandidate(plaintext, adapterKey, materialType, _passwordBookKey);
+                }
+                finally { CryptographicOperations.ZeroMemory(plaintext); }
+                _items[artifactId] = new(summary, nonce, tag, ciphertext, candidate);
+                _expirations.Enqueue(artifactId, summary.RetentionUntilUtc);
                 _storedBytes += ciphertext.Length;
                 SyslogInteractionProjection.PublishSafely(_syslog, "honeypot-evidence", "EVIDENCE_CAPTURED", SyslogSeverity.Informational,
                     new Dictionary<string, object?> { ["credentialArtifactId"] = artifactId, ["eventId"] = eventId,
@@ -71,7 +96,6 @@ public sealed class InMemoryCredentialEvidenceStore : ICredentialEvidenceStore, 
                     ["adapterKey"] = adapterKey, ["errorCode"] = "EVIDENCE_CAPTURE_FAILED" });
             throw;
         }
-        finally { CryptographicOperations.ZeroMemory(plaintext); }
     }
 
     public CredentialEvidenceView? Get(string credentialArtifactId)
@@ -79,7 +103,7 @@ public sealed class InMemoryCredentialEvidenceStore : ICredentialEvidenceStore, 
         lock (_gate)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            PurgeExpired();
+            PurgeExpiredLocked(_clock.GetUtcNow());
             if (!_items.TryGetValue(credentialArtifactId, out var item)) return null;
             var plaintext = new byte[item.Ciphertext.Length];
             try
@@ -97,8 +121,52 @@ public sealed class InMemoryCredentialEvidenceStore : ICredentialEvidenceStore, 
         lock (_gate)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            PurgeExpired();
+            PurgeExpiredLocked(_clock.GetUtcNow());
             return _items.Values.Select(item => item.Summary).OrderByDescending(item => item.CapturedAtUtc).ToArray();
+        }
+    }
+
+    public void ConfirmPasswordBookAttempt(InteractionEvent acceptedEvent)
+    {
+        if (!OverviewActivityProjection.IsAuthenticationFailure(acceptedEvent) || acceptedEvent.CaptureTruncated ||
+            string.IsNullOrEmpty(acceptedEvent.Username) || string.IsNullOrEmpty(acceptedEvent.CredentialArtifactId))
+            return;
+
+        lock (_gate)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            PurgeExpiredLocked(_clock.GetUtcNow());
+            if (!_items.TryGetValue(acceptedEvent.CredentialArtifactId, out var item) || item.Candidate is not { } candidate ||
+                item.Summary.Truncated || !candidate.IsCompatibleWith(acceptedEvent.AuthenticationMethod) ||
+                !string.Equals(candidate.EventUsername, acceptedEvent.Username, StringComparison.Ordinal) ||
+                !string.Equals(item.Summary.EventId, acceptedEvent.EventId, StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(item.Summary.ConnectionId, acceptedEvent.ConnectionId, StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(item.Summary.AdapterKey, acceptedEvent.AdapterKey, StringComparison.OrdinalIgnoreCase) ||
+                (acceptedEvent.MaterialType is { } type && !item.Summary.MaterialType.Equals(type, StringComparison.OrdinalIgnoreCase)) ||
+                !_confirmedEventIds.Add(acceptedEvent.EventId))
+                return;
+
+            // 存证先于事件确认，只有事件成功入库且两者关联一致才计入组合。
+            if (!_passwordBookGroups.TryGetValue(candidate.Fingerprint, out var group))
+                _passwordBookGroups.Add(candidate.Fingerprint, group = new(MostRecentFirst));
+            var attempt = new PasswordBookAttempt(acceptedEvent.Username, item.Summary.AdapterKey,
+                acceptedEvent.OccurredAtUtc.ToUniversalTime(), item.Summary.CredentialArtifactId);
+            group.Add(attempt);
+            item.ConfirmedAttempt = attempt;
+        }
+    }
+
+    public IReadOnlyCollection<PasswordBookRow> GetPasswordBook()
+    {
+        lock (_gate)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            PurgeExpiredLocked(_clock.GetUtcNow());
+            return _passwordBookGroups.Values.Select(group =>
+            {
+                var latest = group.Min!;
+                return new PasswordBookRow(latest.Username, latest.AdapterKey, group.Count, latest.OccurredAtUtc, latest.ArtifactId);
+            }).ToArray();
         }
     }
 
@@ -109,15 +177,25 @@ public sealed class InMemoryCredentialEvidenceStore : ICredentialEvidenceStore, 
     {
         lock (_gate)
         {
-            if (_disposed) return;
-            var now = _clock.GetUtcNow();
-            foreach (var pair in _items)
+            if (!_disposed) PurgeExpiredLocked(_clock.GetUtcNow());
+        }
+    }
+
+    private void PurgeExpiredLocked(DateTimeOffset now)
+    {
+        // 取证路径只处理已经到期的证据，不逐笔扫描所有活跃密文。
+        while (_expirations.TryPeek(out var artifactId, out var expires) && expires <= now)
+        {
+            _expirations.Dequeue();
+            if (!_items.Remove(artifactId, out var expired)) continue;
+            _storedBytes -= expired.Ciphertext.Length;
+            CryptographicOperations.ZeroMemory(expired.Ciphertext);
+            if (expired.ConfirmedAttempt is { } attempt && expired.Candidate is { } candidate)
             {
-                if (pair.Value.Summary.RetentionUntilUtc <= now && _items.TryRemove(pair.Key, out var expired))
-                {
-                    _storedBytes -= expired.Ciphertext.Length;
-                    CryptographicOperations.ZeroMemory(expired.Ciphertext);
-                }
+                _confirmedEventIds.Remove(expired.Summary.EventId);
+                var group = _passwordBookGroups[candidate.Fingerprint];
+                group.Remove(attempt);
+                if (group.Count == 0) _passwordBookGroups.Remove(candidate.Fingerprint);
             }
         }
     }
@@ -131,7 +209,11 @@ public sealed class InMemoryCredentialEvidenceStore : ICredentialEvidenceStore, 
             _expirationTimer.Dispose();
             foreach (var item in _items.Values) CryptographicOperations.ZeroMemory(item.Ciphertext);
             _items.Clear();
+            _expirations.Clear();
+            _passwordBookGroups.Clear();
+            _confirmedEventIds.Clear();
             CryptographicOperations.ZeroMemory(_encryptionKey);
+            CryptographicOperations.ZeroMemory(_passwordBookKey);
         }
     }
 }

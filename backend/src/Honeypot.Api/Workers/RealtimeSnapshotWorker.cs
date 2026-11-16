@@ -67,6 +67,8 @@ public sealed class RealtimeSnapshotWorker : BackgroundService
                 item.State,
                 item.ActiveConnections,
                 item.AcceptedCount,
+                item.RejectedCount,
+                item.EventWriteFailureCount,
                 item.ErrorCount,
                 item.LastError)));
 }

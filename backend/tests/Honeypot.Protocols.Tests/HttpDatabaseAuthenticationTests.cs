@@ -110,15 +110,19 @@ public sealed class HttpDatabaseAuthenticationTests
         Assert.DoesNotContain(sink.Events, x => x.EventType == "AuthenticationAttempted");
     }
 
-    [Fact]
-    public async Task ChunkedBodyAndQueryCredentialsAreBoundedAndNotLogged()
+    [Theory]
+    [InlineData("&p=query-isolated-secret", "query-isolated-secret", true)]
+    [InlineData("&p=", "", true)]
+    [InlineData("", "", false)]
+    public async Task ChunkedBodyAndQueryCredentialsAreBoundedAndNotLogged(string passwordParameter, string password, bool passwordProvided)
     {
-        var session = new AuthenticationByteSession(Encoding.ASCII.GetBytes("POST /query?u=demo&p=query-isolated-secret HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n3\r\na=b\r\n0\r\n\r\n"), 1);
+        var session = new AuthenticationByteSession(Encoding.ASCII.GetBytes($"POST /query?u=demo{passwordParameter} HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n3\r\na=b\r\n0\r\n\r\n"), 1);
         var sink = new AuthenticationRecordingSink();
         await new InfluxDbAdapter().HandleAsync(session, AuthenticationTestServer.Context("influxdb"), AuthenticationTestServer.Profile("influxdb") with { InfluxDbApiVersion = "v1" }, sink);
         Assert.Single(sink.Events, x => x.EventType == "AuthenticationAttempted");
         using var json = JsonDocument.Parse(Assert.Single(sink.Evidence).Content);
-        Assert.Equal("query-isolated-secret", json.RootElement.GetProperty("password").GetString());
+        Assert.Equal(password, json.RootElement.GetProperty("password").GetString());
+        Assert.Equal(passwordProvided, json.RootElement.GetProperty("passwordProvided").GetBoolean());
         Assert.DoesNotContain("query-isolated-secret", JsonSerializer.Serialize(sink.Events));
     }
 

@@ -17,6 +17,131 @@ namespace Honeypot.Api.Data.Migrations
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "10.0.9");
 
+            modelBuilder.Entity("Honeypot.Api.Data.Models.CredentialEvidenceAccessAuditEntity", b =>
+                {
+                    b.Property<string>("AuditId")
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ArtifactId")
+                        .IsRequired()
+                        .HasMaxLength(37)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("OccurredAtUtcTicks")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Operation")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Outcome")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("UserId")
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("AuditId");
+
+                    b.HasIndex("OccurredAtUtcTicks", "AuditId");
+
+                    b.ToTable("credential_evidence_access_audits", (string)null);
+                });
+
+            modelBuilder.Entity("Honeypot.Api.Data.Models.CredentialEvidenceEntity", b =>
+                {
+                    b.Property<string>("ArtifactId")
+                        .HasMaxLength(37)
+                        .HasColumnType("TEXT")
+                        .UseCollation("NOCASE");
+
+                    b.Property<string>("AdapterKey")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("CapturedAtUtcTicks")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<byte[]>("Ciphertext")
+                        .IsRequired()
+                        .HasColumnType("BLOB");
+
+                    b.Property<string>("ConnectionId")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("ContentBytes")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("EventId")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT")
+                        .UseCollation("NOCASE");
+
+                    b.Property<string>("KeyId")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("MaterialType")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<byte[]>("Nonce")
+                        .IsRequired()
+                        .HasMaxLength(12)
+                        .HasColumnType("BLOB");
+
+                    b.Property<string>("PasswordBookFingerprint")
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("PasswordBookOccurredAtUtcTicks")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("PasswordBookUsername")
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("RetentionUntilUtcTicks")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("SourceIp")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<byte[]>("Tag")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("BLOB");
+
+                    b.HasKey("ArtifactId");
+
+                    b.HasIndex("EventId")
+                        .IsUnique()
+                        .HasFilter("\"PasswordBookOccurredAtUtcTicks\" IS NOT NULL");
+
+                    b.HasIndex("KeyId");
+
+                    b.HasIndex("CapturedAtUtcTicks", "ArtifactId");
+
+                    b.HasIndex("RetentionUntilUtcTicks", "ContentBytes");
+
+                    b.HasIndex("PasswordBookFingerprint", "PasswordBookOccurredAtUtcTicks", "ArtifactId")
+                        .HasFilter("\"PasswordBookOccurredAtUtcTicks\" IS NOT NULL");
+
+                    b.ToTable("credential_evidence", (string)null);
+                });
+
             modelBuilder.Entity("Honeypot.Api.Data.Models.EmailDeliveryAttemptEntity", b =>
                 {
                     b.Property<string>("Id")
@@ -149,6 +274,75 @@ namespace Honeypot.Api.Data.Migrations
                     b.ToTable("email_deliveries", (string)null);
                 });
 
+            modelBuilder.Entity("Honeypot.Api.Data.Models.InteractionEventEntity", b =>
+                {
+                    b.Property<string>("EventId")
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT")
+                        .UseCollation("NOCASE");
+
+                    b.Property<int>("ActivityPriority")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("AdapterKey")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT")
+                        .UseCollation("NOCASE");
+
+                    b.Property<string>("ConnectionId")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT")
+                        .UseCollation("NOCASE");
+
+                    b.Property<int>("DestinationPort")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("EventJson")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("EventType")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT")
+                        .UseCollation("NOCASE");
+
+                    b.Property<long>("OccurredAtUtcTicks")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("ReceivedAtUnixMs")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("Sequence")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("SourceIp")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT")
+                        .UseCollation("NOCASE");
+
+                    b.HasKey("EventId");
+
+                    b.HasIndex("ReceivedAtUnixMs");
+
+                    b.HasIndex("AdapterKey", "OccurredAtUtcTicks");
+
+                    b.HasIndex("DestinationPort", "OccurredAtUtcTicks");
+
+                    b.HasIndex("EventType", "OccurredAtUtcTicks");
+
+                    b.HasIndex("OccurredAtUtcTicks", "Sequence");
+
+                    b.HasIndex("SourceIp", "OccurredAtUtcTicks");
+
+                    b.HasIndex("ConnectionId", "Sequence", "OccurredAtUtcTicks");
+
+                    b.ToTable("interaction_events", (string)null);
+                });
+
             modelBuilder.Entity("Honeypot.Api.Data.Models.ListenerBindingEntity", b =>
                 {
                     b.Property<string>("ListenerId")
@@ -190,6 +384,38 @@ namespace Honeypot.Api.Data.Migrations
                         .IsUnique();
 
                     b.ToTable("listener_bindings", (string)null);
+                });
+
+            modelBuilder.Entity("Honeypot.Api.Data.Models.ManagementOperationAuditEntity", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ActorUserId")
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int?>("HttpStatus")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("OccurredAtUnixMs")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Operation")
+                        .IsRequired()
+                        .HasMaxLength(48)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ResourceId")
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("OccurredAtUnixMs", "Id");
+
+                    b.ToTable("management_operation_audits", (string)null);
                 });
 
             modelBuilder.Entity("Honeypot.Api.Data.Models.McpApiKeyEntity", b =>
@@ -569,6 +795,91 @@ namespace Honeypot.Api.Data.Migrations
                     b.HasKey("InstanceId");
 
                     b.ToTable("service_instances", (string)null);
+                });
+
+            modelBuilder.Entity("Honeypot.Api.Data.Models.ThreatProfileEntity", b =>
+                {
+                    b.Property<string>("SourceIp")
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT")
+                        .UseCollation("NOCASE");
+
+                    b.Property<long>("ActiveSessionCount")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("AttemptCount")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("AuthenticationAttemptCount")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("CurrentScore")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("ExpiresAtUnixMs")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("FirstSeenUtcTicks")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("LastEventId")
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("LastReason")
+                        .HasMaxLength(256)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("LastSeenUtcTicks")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("MaxScore")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("PortsJson")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("ProtocolViolationCount")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("ScoreVersion")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ServicesJson")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("SessionCount")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT")
+                        .UseCollation("NOCASE");
+
+                    b.Property<string>("ThreatId")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("SourceIp");
+
+                    b.HasIndex("ExpiresAtUnixMs");
+
+                    b.HasIndex("LastSeenUtcTicks", "SourceIp")
+                        .IsDescending(true, false);
+
+                    b.HasIndex("CurrentScore", "LastSeenUtcTicks", "SourceIp")
+                        .IsDescending(true, true, false);
+
+                    b.HasIndex("CurrentScore", "AuthenticationAttemptCount", "LastSeenUtcTicks", "SourceIp")
+                        .IsDescending(true, true, true, false);
+
+                    b.ToTable("threat_ip_profiles", (string)null);
                 });
 
             modelBuilder.Entity("Honeypot.Api.Data.Models.EmailDeliveryAttemptEntity", b =>

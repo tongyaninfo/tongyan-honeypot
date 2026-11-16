@@ -1,15 +1,19 @@
 using System.Net;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using Honeypot.Protocol.Abstractions.Models;
 using Honeypot.Protocol.Abstractions.Service;
 using Honeypot.Protocols.Common;
+using Honeypot.Runtime.Common;
 using Honeypot.Runtime.Models;
+using Honeypot.Runtime.Options;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace Honeypot.Runtime.Service;
 
 /// <summary>
-/// 单机 TCP 监听编排器。协议适配器不自行开端口，所有连接先经过这里记录。
+/// 单机 TCP 监听编排器。通过接纳检查的连接先记录，再交给协议适配器。
 /// </summary>
 public sealed class TcpListenerHost : IListenerHost
 {
@@ -18,6 +22,9 @@ public sealed class TcpListenerHost : IListenerHost
     private readonly IInteractionEventSink _eventSink;
     private readonly IConnectionIdGenerator _idGenerator;
     private readonly ILogger<TcpListenerHost> _logger;
+    private readonly ConnectionAdmission _admission;
+    private readonly TimeSpan _acceptedEventTimeout;
+    private readonly TimeProvider _clock;
     private Dictionary<string, RuntimeListener> _listeners = new(StringComparer.Ordinal);
     private bool _disposed;
 
@@ -25,12 +32,19 @@ public sealed class TcpListenerHost : IListenerHost
         IProtocolAdapterRegistry adapterRegistry,
         IInteractionEventSink eventSink,
         IConnectionIdGenerator idGenerator,
-        ILogger<TcpListenerHost> logger)
+        ILogger<TcpListenerHost> logger,
+        IOptions<ConnectionAdmissionOptions>? admissionOptions = null,
+        TimeProvider? timeProvider = null)
     {
         _adapterRegistry = adapterRegistry;
         _eventSink = eventSink;
         _idGenerator = idGenerator;
         _logger = logger;
+        var options = admissionOptions?.Value ?? new ConnectionAdmissionOptions();
+        if (!options.IsValid()) throw new ArgumentOutOfRangeException(nameof(admissionOptions), "连接接纳配置无效。");
+        _clock = timeProvider ?? TimeProvider.System;
+        _admission = new ConnectionAdmission(options, _clock);
+        _acceptedEventTimeout = TimeSpan.FromSeconds(options.AcceptedEventTimeoutSeconds);
     }
 
     public IReadOnlyCollection<ListenerRuntimeStatus> GetStatuses()
@@ -38,6 +52,14 @@ public sealed class TcpListenerHost : IListenerHost
         lock (_sync)
         {
             return _listeners.Values.Select(ToStatus).ToArray();
+        }
+    }
+
+    public IReadOnlyCollection<ActiveConnectionSnapshot> GetActiveConnections()
+    {
+        lock (_sync)
+        {
+            return _listeners.Values.SelectMany(listener => listener.ActiveConnectionDetails.Values).ToArray();
         }
     }
 
@@ -55,6 +77,7 @@ public sealed class TcpListenerHost : IListenerHost
                 $"Protocol adapter '{instance.AdapterKey}' is not registered.");
         }
 
+        instance = instance with { Profile = GetAdvertisementProfile(instance) };
         var adapterValidation = await adapter.ValidateAsync(instance.Profile, cancellationToken);
         if (!adapterValidation.IsValid)
         {
@@ -86,8 +109,7 @@ public sealed class TcpListenerHost : IListenerHost
             .ToArray();
         if (currentInstanceListeners.Length == enabledBindings.Length &&
             enabledBindings.All(binding => currentInstanceListeners.Any(runtime =>
-                ListenerKey(runtime.Binding.BindAddress, runtime.Binding.Port, runtime.Binding.Transport)
-                    .Equals(ListenerKey(binding.BindAddress, binding.Port, binding.Transport), StringComparison.OrdinalIgnoreCase))))
+                runtime.State == "Running" && runtime.Binding == binding && runtime.Instance.Profile == instance.Profile)))
         {
             return ListenerApplyResult.Applied($"Instance '{instance.InstanceId}' is already running.");
         }
@@ -231,8 +253,18 @@ public sealed class TcpListenerHost : IListenerHost
             while (!runtime.Cancellation.IsCancellationRequested)
             {
                 var client = await runtime.Listener.AcceptTcpClientAsync(runtime.Cancellation.Token);
-                runtime.AcceptedCount++;
-                var sessionTask = HandleConnectionAsync(runtime, client);
+                Interlocked.Increment(ref runtime.AcceptedCount);
+                var remote = GetRemoteEndpoint(client);
+                var source = remote is null ? null : NormalizeAddress(remote.Address);
+                if (remote is null || source is null || runtime.Cancellation.IsCancellationRequested || !_admission.TryEnter(runtime, source))
+                {
+                    // 拒绝路径只关闭 socket 并增加计数，不分配会话或写入事件。
+                    Interlocked.Increment(ref runtime.RejectedCount);
+                    client.Dispose();
+                    continue;
+                }
+
+                var sessionTask = RunAdmittedConnectionAsync(runtime, client, remote, source);
                 runtime.Sessions.TryAdd(sessionTask, 0);
                 _ = sessionTask.ContinueWith(completed =>
                 {
@@ -259,13 +291,29 @@ public sealed class TcpListenerHost : IListenerHost
         }
     }
 
-    private async Task HandleConnectionAsync(RuntimeListener runtime, TcpClient client)
+    private async Task RunAdmittedConnectionAsync(RuntimeListener runtime, TcpClient client, IPEndPoint remote, IPAddress source)
     {
-        var remote = client.Client.RemoteEndPoint as IPEndPoint;
-        var remoteIp = remote?.Address ?? IPAddress.None;
-        var active = Interlocked.Increment(ref runtime.ActiveConnections);
-        var ipActive = runtime.ConnectionsByIp.AddOrUpdate(remoteIp, 1, static (_, current) => current + 1);
-        var connectionId = _idGenerator.NewConnectionId();
+        string? connectionId = null;
+        try
+        {
+            connectionId = _idGenerator.NewConnectionId();
+            await HandleConnectionAsync(runtime, client, remote, source, connectionId);
+        }
+        finally
+        {
+            // 即使创建会话或写关闭事件失败，也要释放共享的接纳额度。
+            try { client.Dispose(); }
+            finally
+            {
+                if (connectionId is not null) runtime.ActiveConnectionDetails.TryRemove(connectionId, out _);
+                _admission.Exit(runtime, source);
+            }
+        }
+    }
+
+    private async Task HandleConnectionAsync(RuntimeListener runtime, TcpClient client, IPEndPoint remote, IPAddress source, string connectionId)
+    {
+        var remoteIp = source.ToString();
         var session = new TcpHoneypotSession(client, connectionId, runtime.Instance.Profile.MaxSessionBytes);
         var context = new ProtocolSessionContext(
             connectionId,
@@ -289,8 +337,8 @@ public sealed class TcpListenerHost : IListenerHost
                 Sequence = 1,
                 EventType = "ConnectionAccepted",
                 OccurredAtUtc = context.AcceptedAtUtc,
-                SourceIp = remoteIp.ToString(),
-                SourcePort = remote?.Port ?? 0,
+                SourceIp = remoteIp,
+                SourcePort = remote.Port,
                 DestinationIp = GetIp(session.LocalEndPoint),
                 DestinationPort = GetPort(session.LocalEndPoint),
                 Transport = "tcp",
@@ -301,22 +349,17 @@ public sealed class TcpListenerHost : IListenerHost
                 RiskDelta = 1,
             };
 
-            var appendResult = await _eventSink.AppendAsync(accepted, runtime.Cancellation.Token);
+            // 活动连接跟随接纳额度的生命周期，即使事件仍在等待存储也可见。
+            runtime.ActiveConnectionDetails[connectionId] = new(connectionId, accepted.OccurredAtUtc,
+                accepted.SourceIp, accepted.SourcePort, accepted.AdapterKey, accepted.DestinationPort);
+            var appendResult = await RecordConnectionAcceptedAsync(accepted, runtime.Cancellation.Token);
             if (!appendResult.Recorded)
             {
-                _logger.LogError("Connection {ConnectionId} was not recorded on listener {ListenerId}: {ErrorCode}.",
-                    connectionId, runtime.Binding.ListenerId, appendResult.Code);
+                WarnEventWriteFailure(runtime, appendResult.Code);
                 failureReported = true;
                 await session.CloseAsync(SessionCloseReason.StorageDegraded);
                 return;
             }
-
-            if (active > runtime.Binding.MaxConnections || ipActive > runtime.Binding.MaxConnectionsPerIp)
-            {
-                await session.CloseAsync(SessionCloseReason.ResourceLimitExceeded);
-                return;
-            }
-
             if (!_adapterRegistry.TryGet(runtime.Instance.AdapterKey, out var adapter) || adapter is null)
             {
                 await session.CloseAsync(SessionCloseReason.InternalError);
@@ -340,24 +383,35 @@ public sealed class TcpListenerHost : IListenerHost
             // 远端断开和会话字节预算触发不属于宿主内部错误，不输出底层异常正文。
             failureReason = session.ResourceLimitExceeded ? SessionCloseReason.ResourceLimitExceeded : SessionCloseReason.ClientClosed;
         }
+        catch (AuthenticationRecordingException exception)
+        {
+            runtime.LastError = exception.Code;
+            WarnEventWriteFailure(runtime, exception.Code);
+            failureReported = true;
+            failureReason = SessionCloseReason.StorageDegraded;
+        }
         catch (Exception exception)
         {
-            runtime.ErrorCount++;
+            Interlocked.Increment(ref runtime.ErrorCount);
             // 协议输入不可信，异常消息和堆栈可能包含认证材料，仅暴露固定类型/错误码。
-            runtime.LastError = exception is AuthenticationRecordingException recording ? recording.Code : exception.GetType().Name;
+            runtime.LastError = exception.GetType().Name;
             _logger.LogError("Session {ConnectionId} failed on listener {ListenerId}: {ErrorCode}.", connectionId, runtime.Binding.ListenerId, runtime.LastError);
             failureReported = true;
-            failureReason = exception is AuthenticationRecordingException ? SessionCloseReason.StorageDegraded : SessionCloseReason.InternalError;
+            failureReason = SessionCloseReason.InternalError;
         }
         finally
         {
             var reason = failureReason ?? (session.ResourceLimitExceeded ? SessionCloseReason.ResourceLimitExceeded
                 : session.CloseReason ?? SessionCloseReason.AdapterCompleted);
-            if (!failureReported && reason is SessionCloseReason.StorageDegraded or SessionCloseReason.InternalError)
+            if (!failureReported && reason == SessionCloseReason.StorageDegraded)
             {
-                // 部分适配器按既有合同捕获异常并关闭；仍从真实关闭原因发出独立诊断，不能依赖故障事件库。
+                WarnEventWriteFailure(runtime, "SESSION_STORAGE_DEGRADED");
+                failureReported = true;
+            }
+            else if (!failureReported && reason == SessionCloseReason.InternalError)
+            {
                 _logger.LogError("Session {ConnectionId} closed on listener {ListenerId}: {ErrorCode}.",
-                    connectionId, runtime.Binding.ListenerId, reason == SessionCloseReason.StorageDegraded ? "SESSION_STORAGE_DEGRADED" : "SESSION_INTERNAL_ERROR");
+                    connectionId, runtime.Binding.ListenerId, "SESSION_INTERNAL_ERROR");
             }
             try { await session.CloseAsync(reason); }
             catch (Exception)
@@ -368,11 +422,6 @@ public sealed class TcpListenerHost : IListenerHost
             }
             if (reason == SessionCloseReason.AdapterCompleted && session.CloseReason is { } observedReason)
                 reason = observedReason;
-            Interlocked.Decrement(ref runtime.ActiveConnections);
-            runtime.ConnectionsByIp.AddOrUpdate(remoteIp, 0, static (_, current) => Math.Max(0, current - 1));
-            if (runtime.ConnectionsByIp.TryGetValue(remoteIp, out var count) && count == 0)
-                runtime.ConnectionsByIp.TryRemove(remoteIp, out _);
-
             // 最终事件只在这里生成一次，覆盖所有早退/异常分支；宿主停止的令牌不能取消关闭留痕。
             using var finalDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(2));
             try
@@ -382,7 +431,7 @@ public sealed class TcpListenerHost : IListenerHost
                     {
                         EventId = _idGenerator.NewEventId(), ConnectionId = connectionId,
                         EventType = "ResourceLimitExceeded", OccurredAtUtc = DateTimeOffset.UtcNow,
-                        SourceIp = remoteIp.ToString(), SourcePort = remote?.Port ?? 0,
+                        SourceIp = remoteIp, SourcePort = remote.Port,
                         DestinationIp = GetIp(session.LocalEndPoint), DestinationPort = GetPort(session.LocalEndPoint),
                         ListenerId = context.ListenerId, ServiceInstanceId = context.ServiceInstanceId,
                         AdapterKey = context.AdapterKey, ProfileId = context.ProfileId,
@@ -391,7 +440,7 @@ public sealed class TcpListenerHost : IListenerHost
             }
             catch (Exception)
             {
-                _logger.LogError("Session {ConnectionId} limit event could not be recorded: {ErrorCode}.", connectionId, "SESSION_LIMIT_RECORD_FAILED");
+                WarnEventWriteFailure(runtime, "SESSION_LIMIT_RECORD_FAILED");
             }
             using var closeDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(2));
             try
@@ -399,7 +448,7 @@ public sealed class TcpListenerHost : IListenerHost
                 var closed = new InteractionEvent
                 {
                     EventId = _idGenerator.NewEventId(), ConnectionId = connectionId, EventType = "SessionClosed",
-                    OccurredAtUtc = DateTimeOffset.UtcNow, SourceIp = remoteIp.ToString(), SourcePort = remote?.Port ?? 0,
+                    OccurredAtUtc = DateTimeOffset.UtcNow, SourceIp = remoteIp, SourcePort = remote.Port,
                     DestinationIp = GetIp(session.LocalEndPoint), DestinationPort = GetPort(session.LocalEndPoint),
                     Transport = "tcp", ListenerId = context.ListenerId, ServiceInstanceId = context.ServiceInstanceId,
                     AdapterKey = context.AdapterKey, ProfileId = context.ProfileId, Stage = "closed", CloseReason = reason,
@@ -416,13 +465,37 @@ public sealed class TcpListenerHost : IListenerHost
                     },
                 };
                 var closedResult = await sequencedSink.AppendAsync(closed, closeDeadline.Token).AsTask().WaitAsync(closeDeadline.Token);
-                if (!closedResult.Recorded)
-                    _logger.LogError("Session {ConnectionId} close event was not recorded: {ErrorCode}.", connectionId, closedResult.Code);
+                if (!closedResult.Recorded && (!failureReported || reason != SessionCloseReason.StorageDegraded))
+                    WarnEventWriteFailure(runtime, closedResult.Code);
             }
             catch (Exception)
             {
-                _logger.LogError("Session {ConnectionId} close event could not be recorded: {ErrorCode}.", connectionId, "SESSION_CLOSE_RECORD_FAILED");
+                if (!failureReported || reason != SessionCloseReason.StorageDegraded)
+                    WarnEventWriteFailure(runtime, "SESSION_CLOSE_RECORD_FAILED");
             }
+        }
+    }
+
+    private async Task<EventAppendResult> RecordConnectionAcceptedAsync(InteractionEvent accepted, CancellationToken stopping)
+    {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(stopping);
+        deadline.CancelAfter(_acceptedEventTimeout);
+        try { return await _eventSink.AppendAsync(accepted, deadline.Token).AsTask().WaitAsync(deadline.Token); }
+        catch (OperationCanceledException) when (!stopping.IsCancellationRequested && deadline.IsCancellationRequested)
+        { return EventAppendResult.DegradedResult("CONNECTION_EVENT_TIMEOUT", "连接事件写入超时。"); }
+    }
+
+    private void WarnEventWriteFailure(RuntimeListener runtime, string code)
+    {
+        var failures = Interlocked.Increment(ref runtime.EventWriteFailureCount);
+        var lastWarning = Volatile.Read(ref runtime.LastEventWriteWarningTimestamp);
+        var now = _clock.GetTimestamp();
+        // 存储故障持续时只更新计数，避免每条连接再产生错误日志和 Syslog 外发。
+        if (lastWarning == long.MinValue || _clock.GetElapsedTime(lastWarning, now) >= TimeSpan.FromSeconds(30))
+        {
+            if (Interlocked.CompareExchange(ref runtime.LastEventWriteWarningTimestamp, now, lastWarning) == lastWarning)
+                _logger.LogWarning("Listener {ListenerId} event could not be recorded: {ErrorCode}. FailureCount={FailureCount}",
+                    runtime.Binding.ListenerId, code, failures);
         }
     }
 
@@ -457,6 +530,62 @@ public sealed class TcpListenerHost : IListenerHost
     private static string ListenerKey(string bindAddress, int port, string transport) =>
         $"{bindAddress.Trim().ToLowerInvariant()}:{port}/{transport.Trim().ToLowerInvariant()}";
 
+    private static IPEndPoint? GetRemoteEndpoint(TcpClient client)
+    {
+        try { return client.Client.RemoteEndPoint as IPEndPoint; }
+        catch (SocketException) { return null; }
+    }
+
+    private static IPAddress NormalizeAddress(IPAddress address) => address.IsIPv4MappedToIPv6 ? address.MapToIPv4() : address;
+
+    private static ServiceProfile GetAdvertisementProfile(ServiceInstance instance)
+    {
+        var profile = instance.Profile;
+        // 只比较本机标识和已经绑定的地址，避免为了仿真人格执行 DNS 查询。
+        var defaults = ServiceAdapterDefaults.For(profile.AdapterKey);
+        var machineName = Environment.MachineName.TrimEnd('.');
+        var safeHost = defaults.HostName.Equals(machineName, StringComparison.OrdinalIgnoreCase)
+            ? "simulated-service.example.test" : defaults.HostName;
+        return profile with
+        {
+            AdvertisedHostName = IsHostIdentity(ProtocolFingerprint.HostName(profile), machineName, instance.Bindings)
+                ? safeHost : profile.AdvertisedHostName,
+            AdvertisedProduct = IsHostIdentity(profile.AdvertisedProduct, defaults.Product, machineName, instance.Bindings)
+                ? defaults.Product : profile.AdvertisedProduct,
+            AdvertisedVersion = IsHostIdentity(profile.AdvertisedVersion, defaults.ProductVersion, machineName, instance.Bindings)
+                ? defaults.ProductVersion : profile.AdvertisedVersion,
+        };
+    }
+
+    private static bool IsHostIdentity(string? configured, string simulatedDefault, string machineName, IReadOnlyList<ListenerBinding> bindings)
+    {
+        if (string.Equals(configured?.Trim(), simulatedDefault, StringComparison.OrdinalIgnoreCase)) return false;
+        return IsHostIdentity(configured, machineName, bindings);
+    }
+
+    private static bool IsHostIdentity(string? configured, string machineName, IReadOnlyList<ListenerBinding> bindings)
+    {
+        var candidate = configured?.Trim().TrimEnd('.');
+        if (string.IsNullOrEmpty(candidate) || candidate.Equals("localhost", StringComparison.OrdinalIgnoreCase)) return false;
+        if (candidate.Equals(machineName, StringComparison.OrdinalIgnoreCase)) return true;
+        if (!IPAddress.TryParse(candidate, out var requestedAddress)) return false;
+
+        requestedAddress = NormalizeAddress(requestedAddress);
+        if (IPAddress.IsLoopback(requestedAddress)) return false;
+        if (bindings.Any(binding => IPAddress.TryParse(binding.BindAddress, out var bindingAddress) &&
+            NormalizeAddress(bindingAddress).Equals(requestedAddress))) return true;
+
+        try
+        {
+            return NetworkInterface.GetAllNetworkInterfaces().SelectMany(network => network.GetIPProperties().UnicastAddresses)
+                .Any(address => NormalizeAddress(address.Address).Equals(requestedAddress));
+        }
+        catch (Exception error) when (error is NetworkInformationException or SocketException or PlatformNotSupportedException)
+        {
+            return true;
+        }
+    }
+
     private static string GetIp(EndPoint endpoint) => (endpoint as IPEndPoint)?.Address.ToString() ?? "0.0.0.0";
 
     private static int GetPort(EndPoint endpoint) => (endpoint as IPEndPoint)?.Port ?? 0;
@@ -469,9 +598,13 @@ public sealed class TcpListenerHost : IListenerHost
         runtime.Binding.Transport,
         runtime.State,
         Volatile.Read(ref runtime.ActiveConnections),
-        runtime.AcceptedCount,
+        Volatile.Read(ref runtime.AcceptedCount),
         runtime.ErrorCount,
-        runtime.LastError);
+        runtime.LastError)
+    {
+        RejectedCount = Volatile.Read(ref runtime.RejectedCount),
+        EventWriteFailureCount = Volatile.Read(ref runtime.EventWriteFailureCount),
+    };
 
     private async Task StopListenersAsync(
         IEnumerable<RuntimeListener> listeners,

@@ -31,7 +31,7 @@ public sealed class CredentialEvidenceTests
     }
 
     [Theory]
-    [InlineData("GET", "/api/v1/credential-evidence/cred-example", "Read", "cred-example")]
+    [InlineData("GET", "/api/v1/credential-evidence/cred-0123456789abcdef0123456789abcdef", "Read", "cred-0123456789abcdef0123456789abcdef")]
     [InlineData("POST", "/api/v1/credential-evidence/export", "Export", "")]
     public void AuthenticationMiddlewareRejectionAlsoAuditsEvidenceAccess(string method, string path, string operation, string artifactId)
     {
@@ -62,6 +62,25 @@ public sealed class CredentialEvidenceTests
         Assert.DoesNotContain("isolated-sample-password", JsonSerializer.Serialize(store.GetAll()));
         clock.Advance(TimeSpan.FromDays(1));
         Assert.Null(store.Get(saved.CredentialArtifactId));
+        Assert.Empty(store.GetAll());
+    }
+
+    [Fact]
+    public async Task InMemoryEvidenceAcceptsMoreThanTenThousandSmallItemsUntilExpiry()
+    {
+        const int itemCount = 10_001;
+        const string content = "isolated-response";
+        var clock = new TestClock();
+        using var store = new InMemoryCredentialEvidenceStore(clock);
+        for (var index = 0; index < itemCount; index++)
+            await store.SaveAsync("conn", $"event-{index}", "192.0.2.10", "ssh", "Response", content, 1);
+
+        var summaries = store.GetAll();
+        Assert.Equal(itemCount, summaries.Count);
+        var latest = Assert.Single(summaries, item => item.EventId == $"event-{itemCount - 1}");
+        Assert.Equal(content, store.Get(latest.CredentialArtifactId)!.Content);
+
+        clock.Advance(TimeSpan.FromDays(1));
         Assert.Empty(store.GetAll());
     }
 
@@ -104,6 +123,7 @@ public sealed class CredentialEvidenceTests
         builder.Logging.ClearProviders();
         // 使用隔离目录中的真实初始化与登录链路，避免测试虚构角色而漏掉生产身份合同。
         builder.Configuration["Honeypot:DataDirectory"] = Path.Combine(Path.GetTempPath(), $"honeypot-evidence-identity-{Guid.NewGuid():N}");
+        builder.Configuration["Honeypot:SessionLifetimeHours"] = "48";
         var clock = new TestClock();
         builder.Services.AddSingleton<TimeProvider>(clock);
         builder.Services.AddSingleton<IUserIdentityService, FileUserIdentityService>();
@@ -112,7 +132,7 @@ public sealed class CredentialEvidenceTests
         await using var app = builder.Build();
         var identity = app.Services.GetRequiredService<IUserIdentityService>();
         Assert.True((await identity.InitializeFirstAdminAsync("isolated-admin", "Isolated-test-Password123!")).Succeeded);
-        var login = await identity.LoginAsync("isolated-admin", "Isolated-test-Password123!");
+        var login = (await identity.LoginAsync("isolated-admin", "Isolated-test-Password123!")).Session;
         Assert.NotNull(login);
         Assert.Contains("Administrator", login.User.Roles);
         // 未授权/分析员场景注入受限测试身份；管理员使用真实登录令牌，不接触 SQLite/真实用户文件。

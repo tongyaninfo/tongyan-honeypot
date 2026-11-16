@@ -69,6 +69,8 @@ public sealed class RedisAdapter : ProtocolAdapterBase
                 var material = JsonSerializer.SerializeToUtf8Bytes(new
                 {
                     protocol = "redis", username, password = plaintext,
+                    // 单参数 AUTH 使用协议默认账号，客户端并未提交用户名。
+                    usernameProvided = command != "AUTH" || args.Count == 3,
                     usernameBase64 = Convert.ToBase64String(user!), passwordBase64 = Convert.ToBase64String(password!),
                     command, encoding = plaintext is null ? "binary" : "utf8",
                 });

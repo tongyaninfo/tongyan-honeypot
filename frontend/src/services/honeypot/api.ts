@@ -88,8 +88,9 @@ export interface AdapterActivity {
 
 export interface ActivityHour {
   key: string;
-  acceptedConnections: number;
-  authenticationFailures: number;
+  acceptedConnections: number | null;
+  authenticationFailures: number | null;
+  coverageStatus?: 'complete' | 'partial' | 'unknown';
 }
 
 export interface ListenerOverview {
@@ -126,12 +127,108 @@ export interface OverviewMetrics {
   adapterActivity?: AdapterActivity[];
   activityByHour?: ActivityHour[];
   listeners: ListenerOverview[];
+  eventStorage?: {
+    queueDepth: number;
+    rejectedEvents: number;
+    databaseBytes: number;
+    diskBudgetBlocked: boolean;
+    retentionAvailable: boolean;
+    lastPersistedAtUtc?: string | null;
+  };
   host?: {
     osVersion: string;
     hostName: string;
     ipAddresses: string[];
     bootTimeUtc?: string | null;
   };
+}
+
+export type OverviewConnectionScope =
+  | 'active'
+  | 'accepted'
+  | 'authenticationFailures'
+  | 'threatConnections';
+
+export type OverviewAdapterActivityMetric =
+  | 'acceptedConnections'
+  | 'authenticationFailures'
+  | 'sourceIpCount'
+  | 'protocolViolations';
+
+export interface OverviewAdapterActivityFilter {
+  scope: 'adapterActivity';
+  adapterKey: string;
+  metric: OverviewAdapterActivityMetric;
+}
+
+export type OverviewConnectionFilter =
+  | { scope: OverviewConnectionScope }
+  | OverviewAdapterActivityFilter;
+
+export interface OverviewConnectionRow {
+  id: string;
+  connectionId: string;
+  occurredAtUtc: string;
+  sourceIp: string;
+  sourcePort?: number | null;
+  adapterKey: string;
+  destinationPort: number;
+  username?: string | null;
+  credentialArtifactId?: string | null;
+  materialType?: string | null;
+  eventType?: string | null;
+  protocolViolationSummary?: string | null;
+}
+
+export interface ConnectionMapEvent {
+  id: string;
+  occurredAtUtc: string;
+  adapterKey: string;
+  longitude: number;
+  latitude: number;
+  locationLabel: string;
+  sourceIp?: string;
+  country?: string;
+}
+
+export interface ConnectionMapOrigin {
+  id: string;
+  longitude: number;
+  latitude: number;
+  locationLabel: string;
+  adapterKey: string;
+  connectionCount: number;
+  sourceIpCount: number;
+  sources: { ip: string; country: string }[];
+}
+
+export type ConnectionMapWindowSeconds = 60 | 600 | 7200 | 86400;
+
+export interface ConnectionMapSnapshot {
+  sampledAtUtc: string;
+  windowSeconds: number;
+  target: {
+    status: 'ready' | 'pending' | 'unavailable' | 'disabled';
+    label?: string;
+    latitude?: number | null;
+    longitude?: number | null;
+    source?: string;
+    stale?: boolean;
+    updatedAtUtc?: string | null;
+  };
+  events: ConnectionMapEvent[];
+  origins?: ConnectionMapOrigin[];
+  adapterKeys?: string[];
+  coverage: {
+    observed: number;
+    mapped: number;
+    unknown: number;
+    private: number;
+    pending: number;
+    deferred?: number;
+    omitted: number;
+  };
+  locationEnabled: boolean;
 }
 
 export interface ServiceType {
@@ -194,6 +291,7 @@ export interface RuntimeListener extends ListenerBinding {
   adapterKey?: string;
   profileId?: string;
   acceptedCount?: number;
+  rejectedCount?: number;
   errorCount?: number;
 }
 
@@ -211,6 +309,8 @@ export interface InteractionEvent {
   serviceInstanceId: string;
   listenerId: string;
   stage?: string;
+  /** 协议适配器生成的固定诊断码。历史事件可能没有此字段。 */
+  protocolErrorCode?: string | null;
   outcome?: string;
   payloadSummary?: string;
   username?: string;
@@ -265,9 +365,17 @@ export interface CredentialEvidenceView {
   content: string;
 }
 
+export interface PasswordBookRow {
+  username: string;
+  adapterKey: string;
+  authenticationCount: number;
+  lastUsedAtUtc: string;
+  credentialArtifactId: string;
+}
+
 export interface CredentialEvidenceExportItem {
   artifactId: string;
-  outcome: 'OK' | 'NOT_FOUND_OR_EXPIRED';
+  outcome: string;
   evidence?: CredentialEvidenceView;
 }
 
@@ -278,13 +386,40 @@ export function normalizePage<T>(data: PageResult<T> | T[] | undefined): PageRes
   return data ?? { items: [], total: 0, page: 1, pageSize: 20 };
 }
 
-export interface EventQuery {
+export interface PageQuery {
   page?: number;
   pageSize?: number;
+}
+
+export interface EventQuery extends PageQuery {
   sourceIp?: string;
   eventType?: string;
   adapterKey?: string;
   view?: 'activity' | 'raw';
+  connectionIds?: string;
+}
+
+/** 导出逐页读取同一筛选结果，按 ID 合并实时新增导致跨页重复的记录。 */
+export async function loadExportRows<T>(
+  fetchPage: (query: PageQuery) => Promise<ApiResult<PageResult<T>>>,
+  key: (row: T) => string,
+  snapshot?: PageResult<T>,
+) {
+  const read = async (page: number) => {
+    const response = await fetchPage({ page, pageSize: 100 });
+    if (!response.success || !response.data) throw new Error('Export data unavailable');
+    return response.data;
+  };
+  if (snapshot?.page === 1 && snapshot.items.length >= snapshot.total) return snapshot.items;
+  const first = await read(1);
+  const items = new Map(first.items.map((row) => [key(row), row]));
+  const pages = Math.ceil(first.total / Math.max(first.pageSize, 1));
+  for (let page = 2; page <= pages; page++) {
+    const next = await read(page);
+    for (const row of next.items) items.set(key(row), row);
+    if (!next.items.length) break;
+  }
+  return [...items.values()];
 }
 
 function pageParams(params?: object) {
@@ -307,6 +442,21 @@ export async function getOverviewMetrics(options?: Record<string, unknown>) {
   });
 }
 
+export async function getOverviewConnections(
+  query: PageQuery & OverviewConnectionFilter,
+) {
+  return request<ApiResult<PageResult<OverviewConnectionRow>>>(
+    '/api/v1/metrics/overview/connections',
+    { method: 'GET', params: pageParams(query), skipErrorHandler: true },
+  );
+}
+
+export function getOverviewConnectionMap(windowSeconds: ConnectionMapWindowSeconds, signal?: AbortSignal) {
+  return request<ApiResult<ConnectionMapSnapshot>>('/api/v1/metrics/overview/connection-map', {
+    method: 'GET', params: { windowSeconds }, signal, timeout: 5000, skipErrorHandler: true,
+  });
+}
+
 export async function getServiceTypes(options?: Record<string, unknown>) {
   return request<ApiResult<ServiceType[] | PageResult<ServiceType>>>('/api/v1/service-types', {
     method: 'GET',
@@ -315,7 +465,7 @@ export async function getServiceTypes(options?: Record<string, unknown>) {
 }
 
 export async function getServiceInstances(options?: Record<string, unknown>) {
-  return request<ApiResult<PageResult<ServiceInstance>>>('/api/v1/service-instances', {
+  return request<ApiResult<ServiceInstance[] | PageResult<ServiceInstance>>>('/api/v1/service-instances', {
     method: 'GET',
     ...(options || {}),
   });
@@ -330,6 +480,13 @@ export async function createServiceInstance(
     data,
     ...(options || {}),
   });
+}
+
+export function setServiceInstanceRestartPolicy(instanceId: string, autoStart: boolean) {
+  return request<ApiResult<ServiceInstance>>(
+    `/api/v1/service-instances/${encodeURIComponent(instanceId)}/restart-policy`,
+    { method: 'POST', data: { autoStart } },
+  );
 }
 
 export async function startServiceInstance(instanceId: string, options?: Record<string, unknown>) {
@@ -376,29 +533,34 @@ export async function getCredentialEvidence(artifactId: string, options?: Record
   );
 }
 
+export async function getPasswordBook(query: PageQuery & { keyword?: string }, signal?: AbortSignal) {
+  return request<ApiResult<PageResult<PasswordBookRow>>>('/api/v1/password-book', {
+    method: 'GET', params: pageParams(query), signal, skipErrorHandler: true,
+  });
+}
+
 export const evidenceExportBatchSize = 8;
 
 /** 由服务端为每批检查角色和留存期限，并审计原文导出。 */
-export async function exportCredentialEvidence(artifactIds: string[]) {
+export async function exportCredentialEvidence(artifactIds: string[], signal?: AbortSignal) {
   return request<ApiResult<{ items: CredentialEvidenceExportItem[] }>>('/api/v1/credential-evidence/export', {
-    method: 'POST', data: { artifactIds }, skipErrorHandler: true,
+    method: 'POST', data: { artifactIds }, signal, skipErrorHandler: true,
   });
 }
 
-export async function getThreats(options?: Record<string, unknown>) {
+export async function getThreats(query?: PageQuery & { sort?: 'risk' }) {
   return request<ApiResult<PageResult<ThreatIpProfile>>>('/api/v1/threats', {
     method: 'GET',
-    ...(options || {}),
+    params: pageParams(query),
   });
 }
 
-export async function getCredentialEvidenceSummaries(options?: Record<string, unknown>) {
+export async function getCredentialEvidenceSummaries(query?: PageQuery) {
   return request<ApiResult<PageResult<CredentialEvidenceSummary>>>(
     '/api/v1/credential-evidence',
     {
       method: 'GET',
-      params: { summary: true },
-      ...(options || {}),
+      params: pageParams({ ...query, summary: true }),
     },
   );
 }

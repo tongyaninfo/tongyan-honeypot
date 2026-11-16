@@ -11,7 +11,8 @@ import {
 import { Breadcrumb, Card, Tooltip, Typography } from 'antd';
 import { createStyles } from 'antd-style';
 import type { ReactNode } from 'react';
-import type { OverviewMetrics } from '@/services/honeypot/api';
+import type { OverviewConnectionScope, OverviewMetrics } from '@/services/honeypot/api';
+import OverviewConnectionsPopover from './OverviewConnectionsPopover';
 
 const useStyles = createStyles(({ token, css }) => ({
   header: css`
@@ -46,7 +47,7 @@ const useStyles = createStyles(({ token, css }) => ({
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     column-gap: ${token.marginXS}px;
-    > div > span:first-child {
+    > div > button > span:first-child {
       font-size: ${token.fontSize}px;
       gap: ${token.marginXXS}px;
       white-space: nowrap;
@@ -156,6 +157,17 @@ export default function OverviewHeader({
       {text}
     </span>
   );
+  const connectionsMetric = (
+    scope: OverviewConnectionScope,
+    icon: ReactNode,
+    text: string,
+    value?: number,
+  ) => (
+    <OverviewConnectionsPopover scope={scope} label={text}>
+      {label(icon, text)}
+      <span className={styles.value}>{formatCount(value)}</span>
+    </OverviewConnectionsPopover>
+  );
   const host = snapshot?.host;
   const addresses = host?.ipAddresses ?? [];
 
@@ -207,49 +219,35 @@ export default function OverviewHeader({
         </Card>
         <Card className={styles.metricCard}>
           <div className={styles.connectionMetrics}>
-            <div>
-              {label(
-                <ApiOutlined aria-hidden style={{ color: theme.colorInfo }} />,
-                '活动连接',
-              )}
-              <span className={styles.value}>
-                {formatCount(snapshot?.activeConnections)}
-              </span>
-            </div>
-            <div>
-              {label(
-                <DesktopOutlined
-                  aria-hidden
-                  style={{ color: theme.colorInfo }}
-                />,
-                '连接总数',
-              )}
-              <span className={styles.value}>
-                {formatCount(snapshot?.acceptedConnections)}
-              </span>
-            </div>
+            {connectionsMetric(
+              'active',
+              <ApiOutlined aria-hidden style={{ color: theme.colorInfo }} />,
+              '活动连接',
+              snapshot?.activeConnections,
+            )}
+            {connectionsMetric(
+              'accepted',
+              <DesktopOutlined aria-hidden style={{ color: theme.colorInfo }} />,
+              '连接总数',
+              snapshot?.acceptedConnections,
+            )}
           </div>
         </Card>
         <Card className={styles.metricCard}>
-          {label(
+          {connectionsMetric(
+            'authenticationFailures',
             <WarningOutlined aria-hidden style={{ color: theme.colorError }} />,
             '今日认证失败',
+            snapshot?.todayAuthenticationFailures,
           )}
-          <span className={styles.value}>
-            {formatCount(snapshot?.todayAuthenticationFailures)}
-          </span>
         </Card>
         <Card className={styles.metricCard}>
-          {label(
-            <RadarChartOutlined
-              aria-hidden
-              style={{ color: theme.colorWarning }}
-            />,
+          {connectionsMetric(
+            'threatConnections',
+            <RadarChartOutlined aria-hidden style={{ color: theme.colorWarning }} />,
             '威胁 IP',
+            snapshot?.threatIpCount,
           )}
-          <span className={styles.value}>
-            {formatCount(snapshot?.threatIpCount)}
-          </span>
           <span className={styles.hint}>
             认证证据 {formatCount(credentialCount)}
           </span>

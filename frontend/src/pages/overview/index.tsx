@@ -1,10 +1,9 @@
-import { ConfigProvider as PlotConfigProvider, Line } from '@ant-design/plots';
+import { ConfigProvider as PlotConfigProvider } from '@ant-design/plots';
 import { Link, useIntl, useModel } from '@umijs/max';
 import {
   Alert,
   Card,
   Col,
-  Empty,
   Row,
   Space,
   Table,
@@ -13,8 +12,9 @@ import {
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { createStyles } from 'antd-style';
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import SourceIp from '@/components/SourceIp';
+import { useRealtimeRefresh } from '@/hooks/useRealtimeRefresh';
 import {
   type ApiResult,
   getCredentialEvidenceSummaries,
@@ -27,10 +27,12 @@ import {
   type OverviewMetrics,
   type ThreatIpProfile,
 } from '@/services/honeypot/api';
-import { connectHoneypotRealtime } from '@/services/realtime';
 import { resolveTheme } from '@/utils/theme';
-import { AdapterActivityCard, RiskSourcesCard } from './OverviewActivityTables';
+import { AdapterActivityCard, RISK_SOURCE_LIMIT, RiskSourcesCard } from './OverviewActivityTables';
+import OverviewActivityTrend from './OverviewActivityTrend';
+import OverviewConnectionMap from './OverviewConnectionMap';
 import OverviewHeader from './OverviewHeader';
+import { useOverviewConnectionMap } from './useOverviewConnectionMap';
 
 interface OverviewData {
   metrics: OverviewMetrics;
@@ -80,11 +82,8 @@ const resultLabels: Record<string, string> = {
 };
 
 const eventTime = new Intl.DateTimeFormat('zh-CN', {
-  timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
-});
-
-const hourTime = new Intl.DateTimeFormat('zh-CN', {
-  timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit',
+  hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
 });
 
 const listenerStates: Record<string, { text: string; color: string; order: number }> = {
@@ -118,9 +117,9 @@ const readResult = <T,>(result: PromiseSettledResult<ApiResult<T>>) =>
 async function loadOverview(): Promise<OverviewData> {
   const [metricsResult, eventsResult, threatsResult, evidenceResult] = await Promise.allSettled([
     getOverviewMetrics(),
-    getEvents({ view: 'activity', page: 1, pageSize: 50 }),
-    getThreats(),
-    getCredentialEvidenceSummaries(),
+    getEvents({ view: 'activity', page: 1, pageSize: 8 }),
+    getThreats({ sort: 'risk', pageSize: RISK_SOURCE_LIMIT }),
+    getCredentialEvidenceSummaries({ pageSize: 1 }),
   ]);
   const metrics = readResult(metricsResult);
   const events = readResult(eventsResult);
@@ -134,8 +133,6 @@ async function loadOverview(): Promise<OverviewData> {
     activityCount: events ? normalizePage(events).total : undefined,
   };
 }
-
-const emptyChart = (description: string) => <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={description} />;
 
 // 图表独立绘制文字，需要跟随管理台主题。深色下同时提高刻度和连续图例的文字对比度。
 const darkChartTheme = {
@@ -162,67 +159,26 @@ const OverviewPage: React.FC = () => {
   const { styles } = useOverviewStyles(dark);
   const [data, setData] = useState<OverviewData>(emptyData);
   const [loading, setLoading] = useState(true);
-  const trendContainer = useRef<HTMLDivElement>(null);
-  const [trendWidth, setTrendWidth] = useState(0);
+  const requestId = useRef(0);
 
-  useLayoutEffect(() => {
-    const container = trendContainer.current;
-    if (!container) return;
-    // 侧栏展开会改变卡片宽度，但不会触发图表监听的窗口 resize。
-    const measure = () => setTrendWidth(Math.floor(container.getBoundingClientRect().width));
-    const observer = new ResizeObserver(measure);
-    measure();
-    observer.observe(container);
-    return () => observer.disconnect();
-  }, [loading]);
-
-  useEffect(() => {
-    let disposed = false;
-    let refreshing = false;
-    let refreshQueued = false;
-    let cleanup: (() => Promise<void>) | undefined;
-
-    const refresh = async () => {
-      if (disposed) return;
-      // 批量实时消息只合并为一次后续请求，页面保留上次快照以便连续阅读。
-      if (refreshing) {
-        refreshQueued = true;
-        return;
-      }
-      refreshing = true;
-      try {
-        do {
-          refreshQueued = false;
-          const snapshot = await loadOverview();
-          if (!disposed) {
-            setData(snapshot);
-            setLoading(false);
-          }
-        } while (refreshQueued && !disposed);
-      } finally {
-        refreshing = false;
-      }
-    };
-
-    void refresh();
-    void connectHoneypotRealtime({
-      onEvent: () => void refresh(),
-      onRuntime: () => void refresh(),
-    })
-      .then((dispose) => {
-        if (disposed) void dispose();
-        else cleanup = dispose;
-      })
-      .catch(() => {
-        // 页面首次加载和断线期间仍可使用 REST 快照。
-      });
-    return () => {
-      disposed = true;
-      void cleanup?.();
-    };
+  const refresh = useCallback(async () => {
+    const id = ++requestId.current;
+    const snapshot = await loadOverview();
+    if (id === requestId.current) {
+      setData(snapshot);
+      setLoading(false);
+    }
   }, []);
+  useEffect(() => () => { requestId.current++; }, []);
+  const { onConnectionAccepted, onConnectionState, ...connectionMap } = useOverviewConnectionMap();
+  // 整页汇总合并刷新，地图仍直接处理每次连接及实时通道变化。
+  useRealtimeRefresh(refresh, true, { onConnectionAccepted, onConnectionState }, {
+    coalesceMs: 5_000,
+    refreshOnMount: true,
+  });
 
   const { metrics } = data;
+  const storage = metrics.eventStorage;
   const listenerRows = useMemo(
     () => [...metrics.listeners].sort((left, right) =>
       (listenerStates[left.state?.toLowerCase()]?.order ?? 5) - (listenerStates[right.state?.toLowerCase()]?.order ?? 5)
@@ -231,21 +187,13 @@ const OverviewPage: React.FC = () => {
     [metrics.listeners],
   );
 
-  const timelineData = useMemo(
-    () => (metrics.activityByHour ?? []).flatMap((item) => [
-      { hour: hourTime.format(new Date(item.key)), series: '连接', count: item.acceptedConnections },
-      { hour: hourTime.format(new Date(item.key)), series: '认证失败', count: item.authenticationFailures },
-    ]),
-    [metrics.activityByHour],
-  );
-
   const recentEvents = useMemo(
     () => [...data.events].sort((a, b) => new Date(b.occurredAtUtc).getTime() - new Date(a.occurredAtUtc).getTime()).slice(0, 8),
     [data.events],
   );
 
   const eventColumns: ColumnsType<InteractionEvent> = [
-    { title: '时间', dataIndex: 'occurredAtUtc', render: (value: string) => eventTime.format(new Date(value)), width: 106 },
+    { title: '时间', dataIndex: 'occurredAtUtc', render: (value: string) => eventTime.format(new Date(value)), width: 126 },
     { title: '来源 IP', dataIndex: 'sourceIp', width: 180, render: (value: string) => <SourceIp ip={value}><Link to={`/events?sourceIp=${encodeURIComponent(value)}`}>{value}</Link></SourceIp> },
     { title: '协议 / 端口', width: 115, render: (_, row) => `${row.adapterKey?.toUpperCase() || '—'} · ${row.destinationPort}` },
     { title: intl.formatMessage({ id: 'events.event' }), dataIndex: 'eventType', width: 118, render: (value: string) => intl.formatMessage({ id: `events.type.${value}`, defaultMessage: intl.formatMessage({ id: 'events.unknown' }) }) },
@@ -264,6 +212,15 @@ const OverviewPage: React.FC = () => {
           credentialCount={data.credentials}
         />
         {!loading && !data.metricsAvailable && <Alert title="运行指标暂不可用" type="warning" showIcon />}
+        {storage && (storage.diskBudgetBlocked || !storage.retentionAvailable) && (
+          <Alert
+            title={storage.diskBudgetBlocked ? '事件存储已触发磁盘保护' : '事件留存任务异常'}
+            description={`待写入 ${storage.queueDepth} 条，累计拒绝写入 ${storage.rejectedEvents} 条。`}
+            type="warning"
+            showIcon
+          />
+        )}
+        <OverviewConnectionMap dark={dark} {...connectionMap} />
         <Row gutter={[16, 16]}>
           <Col xs={24} xl={12}>
             <AdapterActivityCard activity={metrics.adapterActivity} loading={loading} />
@@ -272,33 +229,7 @@ const OverviewPage: React.FC = () => {
             <RiskSourcesCard threats={data.threats} loading={loading} />
           </Col>
           <Col xs={24} lg={14}>
-            <Card size="small" title="近 24 小时连接与认证失败" loading={loading} style={{ height: '100%' }}>
-              <div ref={trendContainer} style={{ width: '100%', overflow: 'clip' }}>
-                {timelineData.some((item) => item.count > 0) ? (trendWidth > 0 && (
-                  <Line
-                    autoFit={false}
-                    width={trendWidth}
-                    height={202}
-                    data={timelineData}
-                    xField="hour"
-                    yField="count"
-                    colorField="series"
-                    scale={{ color: { domain: ['连接', '认证失败'], range: ['#3b82f6', '#f87171'] } }}
-                    axis={{
-                      x: {
-                        title: false,
-                        labelAutoRotate: false,
-                        labelAutoHide: true,
-                        labelFilter: (_: unknown, index: number) => index % 4 === 0,
-                      },
-                      y: { title: false },
-                    }}
-                    legend={{ color: { position: 'top' } }}
-                    style={{ lineWidth: 2 }}
-                  />
-                )) : emptyChart(metrics.activityByHour ? '近 24 小时暂无连接或认证失败' : '趋势数据不可用')}
-              </div>
-            </Card>
+            <OverviewActivityTrend hours={metrics.activityByHour} loading={loading} />
           </Col>
           <Col xs={24} lg={10}>
             <Card

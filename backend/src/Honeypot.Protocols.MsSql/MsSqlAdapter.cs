@@ -31,6 +31,8 @@ public sealed class MsSqlAdapter : ProtocolAdapterBase
         var maximum = Math.Clamp(profile.MaxFrameBytes, 8, 131071);
         using var transport = new TdsSessionStream(session, profile.MaxSessionBytes);
         var closeReason = SessionCloseReason.AdapterCompleted;
+        var diagnostic = (Stage: "prelogin", ErrorCode: "TDS_PRELOGIN_INVALID");
+        void SetDiagnostic(string stage, string errorCode) => diagnostic = (stage, errorCode);
         try
         {
             var (type, payload) = await TdsTransport.ReadMessageAsync(transport, maximum, ct);
@@ -44,11 +46,12 @@ public sealed class MsSqlAdapter : ProtocolAdapterBase
             await sink.AppendAsync(Event(context, "PreLoginResponseSent", "handshake", "sent", $"tds encryption={encryption}"), ct);
             if (encryption == 2)
             {
-                await HandleLoginAsync(transport, context, profile, sink, maximum, ct);
+                await HandleLoginAsync(transport, context, profile, sink, maximum, SetDiagnostic, ct);
             }
             else
             {
-                using var certificate = ProtocolTls.CreateServerCertificate(ProtocolFingerprint.HostName(profile));
+                SetDiagnostic("tls", "TDS_TLS_FAILED");
+                using var certificate = ProtocolTls.GetServerCertificate(profile);
                 using var handshake = new TdsTlsHandshakeStream(transport, maximum);
                 using var tls = new SslStream(handshake, leaveInnerStreamOpen: true);
                 await tls.AuthenticateAsServerAsync(new SslServerAuthenticationOptions
@@ -61,7 +64,7 @@ public sealed class MsSqlAdapter : ProtocolAdapterBase
                 }, ct);
                 handshake.CompleteHandshake();
                 await sink.AppendAsync(Event(context, "TlsHandshakeCompleted", "tls", "observed", "TDS TLS established"), ct);
-                await HandleLoginAsync(tls, context, profile, sink, maximum, ct);
+                await HandleLoginAsync(tls, context, profile, sink, maximum, SetDiagnostic, ct);
             }
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
@@ -88,22 +91,28 @@ public sealed class MsSqlAdapter : ProtocolAdapterBase
         catch (Exception ex) when (ex is InvalidDataException or DecoderFallbackException or AuthenticationException)
         {
             closeReason = SessionCloseReason.ProtocolViolation;
-            // 不输出原始异常，避免协议载荷或认证材料进入日志。
-            await sink.AppendAsync(Event(context, "ProtocolViolation", "handshake", "failure", "Invalid or unsupported TDS authentication exchange"), cancellationToken);
+            // 阶段和错误码来自适配器常量，避免载荷、令牌或异常原文进入日志。
+            var violation = Event(context, "ProtocolViolation", diagnostic.Stage, "failure", "Invalid or unsupported TDS authentication exchange")
+                with { ProtocolErrorCode = diagnostic.ErrorCode };
+            await sink.AppendAsync(violation, cancellationToken);
         }
         catch (IOException) { closeReason = SessionCloseReason.ClientClosed; }
         finally { await session.CloseAsync(closeReason, CancellationToken.None); }
     }
 
     private static async ValueTask HandleLoginAsync(Stream stream, ProtocolSessionContext context, ServiceProfile profile,
-        IInteractionEventSink sink, int maximum, CancellationToken ct)
+        IInteractionEventSink sink, int maximum, Action<string, string> setDiagnostic, CancellationToken ct)
     {
+        setDiagnostic("login7", "TDS_LOGIN7_INVALID");
         var (type, payload) = await TdsTransport.ReadMessageAsync(stream, maximum, ct);
         if (type != 0x10) throw new InvalidDataException("Expected LOGIN7.");
         var login = TdsProtocol.ReadLogin(payload);
         string? username = login.Username;
         if (login.IntegratedSecurity)
+        {
+            setDiagnostic("integrated-auth", "TDS_INTEGRATED_AUTH_INVALID");
             username = await RecordSspiAsync(stream, login, context, profile, sink, maximum, ct);
+        }
         else
         {
             var material = login.FederatedAuthentication

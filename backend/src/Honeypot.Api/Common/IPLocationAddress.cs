@@ -6,6 +6,9 @@ namespace Honeypot.Api.Common;
 
 public static class IPLocationAddress
 {
+    public static bool HasCoordinates(double? latitude, double? longitude) =>
+        latitude is >= -90 and <= 90 && longitude is >= -180 and <= 180;
+
     public static bool TryParse(string? input, out IPAddress address)
     {
         address = IPAddress.None;

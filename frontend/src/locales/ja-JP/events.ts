@@ -2,6 +2,16 @@ import base from '../en-US/events';
 
 export default {
   ...base,
+  'passwordBook.account': 'アカウント',
+  'passwordBook.service': 'サービス',
+  'passwordBook.authCount': '認証試行回数',
+  'passwordBook.lastUsed': '最終使用日時',
+  'passwordBook.loadingPassword': '読み込み中…',
+  'passwordBook.emptyPassword': '（空のパスワード）',
+  'passwordBook.unavailablePassword': '証拠が利用できないか期限切れです',
+  'passwordBook.empty': '記録されたパスワードはありません',
+  'passwordBook.unavailable': 'パスワード一覧を取得できません',
+  'passwordBook.adminOnly': '管理者のみパスワード一覧にアクセスできます。',
   'events.type.AuthorizationDenied': 'アクセス拒否',
   'credentials.password': 'パスワード',
   'credentials.passwordNotCaptured': '平文パスワード未取得',

@@ -12,9 +12,7 @@ public static class OverviewActivityProjection
     public static (MetricBucket[] EventsByHour, AdapterActivityMetric[] AdapterActivity, HourlyActivityMetric[] ActivityByHour)
         Build(IEnumerable<InteractionEvent> events, DateTimeOffset now)
     {
-        var utc = now.UtcDateTime;
-        var firstHour = new DateTimeOffset(utc.Date.AddHours(utc.Hour - (Hours - 1)));
-        var endHour = firstHour.AddHours(Hours);
+        var (firstHour, endHour) = HourWindow(now);
         var eventCounts = new int[Hours];
         var activityCounts = new (int Connections, int Failures)[Hours];
         var byAdapter = new Dictionary<string, AdapterCounts>(StringComparer.OrdinalIgnoreCase);
@@ -25,17 +23,17 @@ public static class OverviewActivityProjection
 
             var index = (int)(item.OccurredAtUtc - firstHour).TotalHours;
             eventCounts[index]++;
-            var connection = string.Equals(item.EventType, "ConnectionAccepted", StringComparison.OrdinalIgnoreCase);
+            var connection = IsConnectionAccepted(item);
             var failure = IsAuthenticationFailure(item);
-            var violation = string.Equals(item.EventType, "ProtocolViolation", StringComparison.OrdinalIgnoreCase);
+            var violation = IsProtocolViolation(item);
             if (!connection && !failure && !violation) continue;
 
             // 协议握手步骤仍计入旧趋势，不作为连接或认证失败重复统计。
             if (connection) activityCounts[index].Connections++;
             if (failure) activityCounts[index].Failures++;
 
-            var key = item.AdapterKey?.Trim();
-            if (string.IsNullOrEmpty(key) || key.Equals("unknown", StringComparison.OrdinalIgnoreCase)) continue;
+            var key = NamedValue(item.AdapterKey);
+            if (key is null) continue;
             if (!byAdapter.TryGetValue(key, out var adapter))
             {
                 adapter = new AdapterCounts();
@@ -47,16 +45,14 @@ public static class OverviewActivityProjection
             if (violation) adapter.ProtocolViolations++;
             if (item.OccurredAtUtc > adapter.LastActivityAtUtc) adapter.LastActivityAtUtc = item.OccurredAtUtc.ToUniversalTime();
 
-            var source = item.SourceIp?.Trim();
-            if (!string.IsNullOrEmpty(source) && !source.Equals("unknown", StringComparison.OrdinalIgnoreCase))
-                adapter.SourceIps.Add(source);
+            if (NamedValue(item.SourceIp) is { } source) adapter.SourceIps.Add(source);
         }
 
         var eventBuckets = new MetricBucket[Hours];
         var activityBuckets = new HourlyActivityMetric[Hours];
         for (var index = 0; index < Hours; index++)
         {
-            var key = firstHour.AddHours(index).ToString("yyyy-MM-ddTHH:00:00Z", CultureInfo.InvariantCulture);
+            var key = FormatHour(firstHour.AddHours(index));
             eventBuckets[index] = new MetricBucket(key, eventCounts[index]);
             activityBuckets[index] = new HourlyActivityMetric(key, activityCounts[index].Connections, activityCounts[index].Failures);
         }
@@ -72,9 +68,46 @@ public static class OverviewActivityProjection
         return (eventBuckets, adapterActivity, activityBuckets);
     }
 
+    public static bool IsConnectionAccepted(InteractionEvent item) =>
+        string.Equals(item.EventType, "ConnectionAccepted", StringComparison.OrdinalIgnoreCase);
+
     public static bool IsAuthenticationFailure(InteractionEvent item) =>
         string.Equals(item.EventType, "AuthenticationAttempted", StringComparison.OrdinalIgnoreCase) &&
         string.Equals(item.Outcome, "failure", StringComparison.OrdinalIgnoreCase);
+
+    internal static bool IsProtocolViolation(InteractionEvent item) =>
+        string.Equals(item.EventType, "ProtocolViolation", StringComparison.OrdinalIgnoreCase);
+
+    internal static IEnumerable<InteractionEvent> AdapterEvents(IEnumerable<InteractionEvent> events, DateTimeOffset now, string adapterKey)
+    {
+        var (start, end) = HourWindow(now);
+        return events.Where(item => item.OccurredAtUtc >= start && item.OccurredAtUtc < end &&
+            string.Equals(NamedValue(item.AdapterKey), adapterKey, StringComparison.OrdinalIgnoreCase) &&
+            (IsConnectionAccepted(item) || IsAuthenticationFailure(item) || IsProtocolViolation(item)));
+    }
+
+    internal static string? NamedValue(string? value) => value?.Trim() is { Length: > 0 } trimmed &&
+        !trimmed.Equals("unknown", StringComparison.OrdinalIgnoreCase) ? trimmed : null;
+
+    internal static string FormatHour(DateTimeOffset utcHour) =>
+        utcHour.ToString("yyyy-MM-ddTHH:00:00Z", CultureInfo.InvariantCulture);
+
+    internal static (DateTimeOffset Start, DateTimeOffset End) HourWindow(DateTimeOffset now)
+    {
+        var utc = now.UtcDateTime;
+        var start = new DateTimeOffset(utc.Date.AddHours(utc.Hour - (Hours - 1)));
+        return (start, start.AddHours(Hours));
+    }
+
+    public static IEnumerable<InteractionEvent> TodayAuthenticationFailures(IEnumerable<InteractionEvent> events, DateTimeOffset now)
+    {
+        // 总览和弹层按同一个北京时间自然日统计，包含当天零点，排除次日零点。
+        var shanghaiOffset = TimeSpan.FromHours(8);
+        var dayStart = new DateTimeOffset(now.ToOffset(shanghaiOffset).Date, shanghaiOffset);
+        var nextDayStart = dayStart.AddDays(1);
+        return events.Where(item => item.OccurredAtUtc >= dayStart && item.OccurredAtUtc < nextDayStart &&
+            IsAuthenticationFailure(item));
+    }
 
     private sealed class AdapterCounts
     {

@@ -1,7 +1,7 @@
 namespace Honeypot.Engine.Models;
 
 /// <summary>
-/// 按来源 IP 聚合的威胁档案。当前实现只保存进程内状态，持久化由后续 Persistence 项目接管。
+/// 按来源 IP 聚合的威胁档案。
 /// </summary>
 public sealed class ThreatIpProfile
 {

@@ -131,6 +131,46 @@ describe('threat activity list', () => {
     expect(api.getCredentialEvidence).not.toHaveBeenCalled();
   });
 
+  it('shows the fixed MSSQL diagnostics and keeps the original summaries for historical steps', async () => {
+    const definitions = [
+      ['prelogin', 'TDS_PRELOGIN_INVALID', '预登录协商', 'Pre-login negotiation'],
+      ['tls', 'TDS_TLS_FAILED', 'TLS 握手', 'TLS handshake'],
+      ['login7', 'TDS_LOGIN7_INVALID', '登录包解析', 'Login packet parsing'],
+      ['integrated-auth', 'TDS_INTEGRATED_AUTH_INVALID', '集成认证', 'Integrated authentication'],
+    ];
+    const diagnosticSteps = definitions.map(([stage, protocolErrorCode], index) => ({
+      ...login,
+      eventId: `diagnostic-${stage}`, sequence: index + 1,
+      adapterKey: 'MSSQL', eventType: 'ProtocolViolation', stage, protocolErrorCode,
+      payloadSummary: 'synthetic raw diagnostic text',
+    }));
+    vi.mocked(api.getConnectionEvents).mockResolvedValue(ok([
+      ...diagnosticSteps,
+      { ...login, eventId: 'legacy-step', payloadSummary: '历史连接摘要' },
+      { ...login, eventId: 'historical-mssql-step', adapterKey: 'mssql', protocolErrorCode: null, payloadSummary: '历史 MSSQL 摘要' },
+      { ...login, eventId: 'unrecognized-mssql-step', adapterKey: 'mssql', protocolErrorCode: 'UNKNOWN_PROTOCOL_CODE' },
+    ]));
+    const view = render(<EventsPage />);
+    fireEvent.click(await screen.findByRole('button', { name: '8 个步骤' }));
+    await screen.findByText('TDS_PRELOGIN_INVALID');
+    for (const [, code, chineseLabel] of definitions) {
+      expect(screen.getByText(code)).toBeInTheDocument();
+      expect(screen.getByText(chineseLabel)).toBeInTheDocument();
+    }
+    expect(screen.getAllByText('失败阶段')).toHaveLength(4);
+    expect(screen.getAllByText('协议错误码')).toHaveLength(4);
+    expect(screen.getByText('历史连接摘要')).toBeInTheDocument();
+    expect(screen.getByText('历史 MSSQL 摘要')).toBeInTheDocument();
+    expect(screen.queryByText('UNKNOWN_PROTOCOL_CODE')).not.toBeInTheDocument();
+    expect(screen.queryByText('synthetic raw diagnostic text')).not.toBeInTheDocument();
+
+    session.locale = 'en-US';
+    view.rerender(<EventsPage />);
+    for (const [, , , englishLabel] of definitions) expect(screen.getByText(englishLabel)).toBeInTheDocument();
+    expect(screen.getAllByText('Failure stage')).toHaveLength(4);
+    expect(api.getCredentialEvidence).not.toHaveBeenCalled();
+  });
+
   it('does not offer raw credential access to non-admin users', async () => {
     session.roles = ['Analyst'];
     render(<EventsPage />);

@@ -1,4 +1,5 @@
 export default {
+  'menu.passwordBook': 'دفتر گذرواژه‌ها',
   'menu.welcome': 'خوش آمدید',
   'menu.more-blocks': 'بلوک های بیشتر',
   'menu.home': 'خانه',

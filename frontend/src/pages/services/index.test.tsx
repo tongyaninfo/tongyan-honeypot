@@ -1,4 +1,5 @@
-import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { request } from '@umijs/max';
 import { afterEach, expect, it, vi } from 'vitest';
 import * as api from '@/services/honeypot/api';
 import { connectHoneypotRealtime } from '@/services/realtime';
@@ -48,8 +49,16 @@ const rdpInstance: api.ServiceInstance = {
 
 const ok = <T,>(data: T) => ({ success: true, code: 'OK', message: '', data });
 const page = <T,>(items: T[]) => ({ items, total: items.length, page: 1, pageSize: 20 });
+const requestedAutoStart = (data: unknown) => {
+  const value = (data as { autoStart?: unknown } | undefined)?.autoStart;
+  if (typeof value !== 'boolean') throw new Error('Expected a boolean restart policy');
+  return value;
+};
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.clearAllMocks();
+});
 
 it('groups adapters into tabs and keeps a port draft through switching and realtime refresh', async () => {
   vi.mocked(api.getServiceTypes).mockResolvedValue(ok(serviceTypes));
@@ -148,4 +157,69 @@ it('shows a conflicting default port without silently incrementing it or creatin
   expect(card.getByText(/端口冲突：6379/)).toBeInTheDocument();
   fireEvent.click(card.getByRole('button', { name: /启\s*动/ }));
   expect(api.createServiceInstance).not.toHaveBeenCalled();
+});
+
+it('saves and rereads restart policy for an existing instance without resaving its configuration', async () => {
+  let stored = { ...rdpInstance, autoStart: false, currentState: 'Stopped' };
+  vi.mocked(api.getServiceTypes).mockResolvedValue(ok(serviceTypes));
+  vi.mocked(api.getServiceInstances).mockImplementation(async () => ok([stored]));
+  vi.mocked(api.getListeners).mockResolvedValue(ok(page([])));
+  vi.mocked(request).mockImplementation(async (_url: string, options?: { data?: unknown }) => {
+    stored = { ...stored, autoStart: requestedAutoStart(options?.data) };
+    return ok(stored);
+  });
+
+  const firstVisit = render(<ServicesPage />);
+  const card = within(await screen.findByTestId('service-card-rdp'));
+  const policy = card.getByRole('switch', { name: '重启自动启动' });
+  expect(policy).not.toBeChecked();
+  fireEvent.click(policy);
+  await waitFor(() => expect(policy).toBeChecked());
+  expect(request).toHaveBeenLastCalledWith('/api/v1/service-instances/rdp-instance/restart-policy', {
+    method: 'POST', data: { autoStart: true },
+  });
+  expect(api.createServiceInstance).not.toHaveBeenCalled();
+
+  firstVisit.unmount();
+  render(<ServicesPage />);
+  const reopened = within(await screen.findByTestId('service-card-rdp'));
+  const reopenedPolicy = reopened.getByRole('switch', { name: '重启自动启动' });
+  expect(reopenedPolicy).toBeChecked();
+  expect(reopened.getByRole('button', { name: /启\s*动/ })).toBeInTheDocument();
+  expect(reopened.getByDisplayValue('3389')).toBeInTheDocument();
+
+  fireEvent.click(reopenedPolicy);
+  await waitFor(() => expect(reopenedPolicy).not.toBeChecked());
+  expect(request).toHaveBeenLastCalledWith('/api/v1/service-instances/rdp-instance/restart-policy', {
+    method: 'POST', data: { autoStart: false },
+  });
+  expect(api.createServiceInstance).not.toHaveBeenCalled();
+});
+
+it('saves an unconfigured default instance before updating its restart policy', async () => {
+  let stored: api.ServiceInstance | undefined;
+  vi.mocked(api.getServiceTypes).mockResolvedValue(ok(serviceTypes));
+  vi.mocked(api.getServiceInstances).mockImplementation(async () => ok(stored ? [stored] : []));
+  vi.mocked(api.getListeners).mockResolvedValue(ok(page([])));
+  vi.mocked(api.createServiceInstance).mockImplementation(async (instance) => {
+    stored = instance;
+    return ok(instance);
+  });
+  vi.mocked(request).mockImplementation(async (_url: string, options?: { data?: unknown }) => {
+    if (!stored) throw new Error('Instance config must be saved first');
+    stored = { ...stored, autoStart: requestedAutoStart(options?.data) };
+    return ok(stored);
+  });
+
+  render(<ServicesPage />);
+  const card = within(await screen.findByTestId('service-card-rdp'));
+  const policy = card.getByRole('switch', { name: '重启自动启动' });
+  fireEvent.click(policy);
+  await waitFor(() => expect(policy).toBeChecked());
+  expect(api.createServiceInstance).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+    instanceId: 'rdp-default', autoStart: false,
+  }));
+  expect(request).toHaveBeenCalledExactlyOnceWith('/api/v1/service-instances/rdp-default/restart-policy', {
+    method: 'POST', data: { autoStart: true },
+  });
 });

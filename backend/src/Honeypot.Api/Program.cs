@@ -6,6 +6,7 @@ using Honeypot.Api.Data;
 using Honeypot.Api.Workers;
 using Honeypot.Api.Realtime;
 using Honeypot.Api.Middleware;
+using Honeypot.Api.Options;
 using Honeypot.Engine.Service;
 using Honeypot.Engine.Service.impl;
 using Honeypot.Protocol.Abstractions.Models;
@@ -15,7 +16,14 @@ using Honeypot.Runtime.Service;
 using Honeypot.Shared.Models;
 using Microsoft.EntityFrameworkCore;
 
+if (args is ["--probe-management-health"])
+{
+    Environment.ExitCode = await ManagementHttps.ProbeLoopbackAsync();
+    return;
+}
+
 var builder = WebApplication.CreateBuilder(args);
+builder.UseManagementHttps();
 builder.Services.AddSingleton<ISyslogSettingsStore, FileSyslogSettingsStore>();
 builder.Services.AddSingleton<SyslogQueue>();
 builder.Services.AddSingleton<ISyslogPublisher>(services => services.GetRequiredService<SyslogQueue>());
@@ -30,21 +38,24 @@ builder.Logging.AddFilter<SyslogLoggerProvider>("ModelContextProtocol", LogLevel
 builder.Services.AddSingleton<IThreatDecisionEngine, ThreatDecisionEngine>();
 builder.Services.AddSingleton<IUserIdentityService, FileUserIdentityService>();
 builder.Services.AddIPLocation();
+builder.Services.AddConnectionMapTarget();
 var databasePath = HoneypotDbOptions.ResolveDatabasePath(builder.Configuration, builder.Environment);
 builder.Services.AddDbContextFactory<HoneypotDbContext>(options => options.UseSqlite($"Data Source={databasePath};Cache=Shared;Foreign Keys=True"));
 builder.Services.AddHostedService<HoneypotDbInitializer>();
 builder.Services.AddHoneypotRuntime();
 builder.Services.AddSingleton<ServiceInstanceOperations>();
 builder.Services.AddBuiltinProtocolAdapters();
-builder.Services.AddSingleton<IThreatProfileStore, InMemoryThreatProfileStore>();
-builder.Services.AddSingleton<IInteractionEventStore, InMemoryInteractionEventStore>();
-builder.Services.AddSingleton<IInteractionEventSink>(services => services.GetRequiredService<IInteractionEventStore>());
 builder.Services.AddSingleton<IServiceInstanceStore, SqliteServiceInstanceStore>();
-builder.Services.AddHostedService<ServiceInstanceRecoveryWorker>();
-builder.Services.AddSingleton<ICredentialEvidenceStore, InMemoryCredentialEvidenceStore>();
+builder.Services.AddOptions<CredentialEvidenceOptions>().BindConfiguration(CredentialEvidenceOptions.SectionName)
+    .ValidateDataAnnotations().ValidateOnStart();
+builder.Services.AddSingleton<CredentialEvidenceKeys>();
+builder.Services.AddSingleton<ICredentialEvidenceStore, SqliteCredentialEvidenceStore>();
 builder.Services.AddSingleton<ICredentialEvidenceAccessService, CredentialEvidenceAccessService>();
-// 先持久化报告元数据，再进入现有内存视图和实时广播；邮件外发由独立后台任务执行。
+builder.Services.AddHostedService<CredentialEvidenceRetentionWorker>();
+builder.Services.AddSingleton<ManagementOperationAuditStore>();
+// 写入事务完成后才进入实时广播。邮件外发由独立后台任务执行。
 builder.Services.AddHoneypotReports();
+builder.Services.AddHostedService<ServiceInstanceRecoveryWorker>();
 builder.Services.AddSingleton<SqliteReportService>();
 builder.Services.AddSingleton<IReportService, ReportWithMailSummaryService>();
 builder.Services.AddSingleton<IResourceIdGenerator, ResourceIdGenerator>();
@@ -74,7 +85,15 @@ app.Lifetime.ApplicationStopping.Register(() => syslog.Publish("honeypot-host", 
 app.UseHoneypotMcpTransport();
 app.UseMiddleware<SyslogRequestAuditMiddleware>();
 app.UseDefaultFiles();
-app.UseStaticFiles();
+app.UseStaticFiles(new StaticFileOptions
+{
+    OnPrepareResponse = file =>
+    {
+        // 地图来源说明使用 UTF-8，显式声明字符集以避免浏览器误判中文。
+        if (file.Context.Request.Path.Equals("/assets/maps/attribution.txt", StringComparison.OrdinalIgnoreCase))
+            file.Context.Response.ContentType = "text/plain; charset=utf-8";
+    },
+});
 app.UseCors("local-development");
 
 // SignalR 的 WebSocket 请求不一定携带普通 HTTP Authorization 头，
@@ -119,6 +138,9 @@ app.Use(async (context, next) =>
     }
 
     var path = context.Request.Path.Value ?? string.Empty;
+    if (context.Request.Path.StartsWithSegments(PasswordBookEndpoints.Path) ||
+        context.Request.Path.StartsWithSegments(OverviewConnectionMapEndpoints.Path))
+        context.Response.Headers.CacheControl = "no-store";
     var openEndpoint = path.Equals("/api/v1/setup/status", StringComparison.OrdinalIgnoreCase)
         || path.Equals("/api/v1/setup/initialize", StringComparison.OrdinalIgnoreCase)
         || path.Equals("/api/v1/auth/login", StringComparison.OrdinalIgnoreCase)
@@ -151,27 +173,52 @@ app.Use(async (context, next) =>
     await next();
 });
 
+app.UseMiddleware<ManagementOperationAuditMiddleware>();
+
 app.MapGet("/health", () => Results.Ok(ApiResult<HealthStatus>.Ok(
     new HealthStatus("Honeypot.Api", "0.1.0", DateTimeOffset.UtcNow))));
 
 app.MapGet("/api/v1/setup/status", (IUserIdentityService identity) =>
     Results.Ok(ApiResult<object>.Ok(new { initialized = identity.IsInitialized, requiresSetup = !identity.IsInitialized })));
 
-app.MapPost("/api/v1/setup/initialize", async (InitializeAdminRequest request, IUserIdentityService identity, CancellationToken cancellationToken) =>
+app.MapPost("/api/v1/setup/initialize", async (InitializeAdminRequest request, IUserIdentityService identity, HttpContext context,
+    CancellationToken cancellationToken) =>
 {
     var result = await identity.InitializeFirstAdminAsync(request.Username, request.Password, cancellationToken);
+    if (result.Succeeded && identity.GetUsers().SingleOrDefault() is { } admin)
+    {
+        context.Items["CurrentUser"] = admin;
+        ManagementOperationAuditMiddleware.SetResourceId(context, admin.UserId);
+    }
     return result.Succeeded
         ? Results.Ok(ApiResult<object>.Ok(new { initialized = true, message = result.Message }))
         : Results.BadRequest(ApiResult<object>.Fail(result.Code, result.Message));
 });
 
-app.MapPost("/api/v1/auth/login", async (LoginRequest request, IUserIdentityService identity, HttpContext context, CancellationToken cancellationToken) =>
+app.MapPost("/api/v1/auth/login", async (LoginRequest request, IUserIdentityService identity, HttpContext context, TimeProvider clock, CancellationToken cancellationToken) =>
 {
     var result = await identity.LoginAsync(request.Username, request.Password, cancellationToken);
-    if (result is not null) context.Items["CurrentUser"] = result.User;
-    return result is null
-        ? Results.Unauthorized()
-        : Results.Ok(ApiResult<LoginResult>.Ok(result));
+    context.Response.Headers.CacheControl = "no-store";
+    if (result.LockedUntilUtc is { } lockedUntil)
+    {
+        if (result.LockoutStarted) ManagementOperationAuditMiddleware.MarkLoginLockoutStarted(context);
+        var seconds = Math.Max(1, (int)Math.Ceiling((lockedUntil - clock.GetUtcNow()).TotalSeconds));
+        context.Response.Headers.RetryAfter = seconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var minutes = (seconds + 59) / 60;
+        return Results.Json(ApiResult<object>.Fail("LOGIN_LOCKED", $"系统登录已锁定，请在约 {minutes} 分钟后重试。"),
+            statusCode: StatusCodes.Status429TooManyRequests);
+    }
+    if (result.Busy)
+    {
+        context.Response.Headers.RetryAfter = "1";
+        return Results.Json(ApiResult<object>.Fail("LOGIN_BUSY", "登录请求过多，请稍后重试。"),
+            statusCode: StatusCodes.Status429TooManyRequests);
+    }
+    if (result.Session is not { } session)
+        return Results.Json(ApiResult<object>.Fail("INVALID_CREDENTIALS", "用户名或密码错误。"), statusCode: StatusCodes.Status401Unauthorized);
+
+    context.Items["CurrentUser"] = session.User;
+    return Results.Ok(ApiResult<LoginResult>.Ok(session));
 });
 
 app.MapGet("/api/v1/auth/me", (HttpContext context) =>
@@ -220,14 +267,17 @@ app.MapGet("/api/v1/service-types/{adapterKey}/capabilities", (string adapterKey
 app.MapGet("/api/v1/service-instances", (IServiceInstanceStore store) =>
     Results.Ok(ApiResult<IReadOnlyCollection<ServiceInstance>>.Ok(store.GetAll())));
 
-app.MapPost("/api/v1/service-instances", async (ServiceInstance instance, ServiceInstanceOperations operations, CancellationToken cancellationToken) =>
+app.MapPost("/api/v1/service-instances", async (ServiceInstance instance, ServiceInstanceOperations operations, HttpContext context,
+    CancellationToken cancellationToken) =>
 {
     if (instance.Bindings.Count == 0)
     {
         return Results.BadRequest(ApiResult<object>.Fail("VALIDATION_ERROR", "At least one listener binding is required."));
     }
 
-    return Results.Ok(ApiResult<ServiceInstance>.Ok(await operations.SaveAsync(instance, cancellationToken)));
+    var saved = await operations.SaveAsync(instance, cancellationToken);
+    ManagementOperationAuditMiddleware.SetResourceId(context, saved.InstanceId);
+    return Results.Ok(ApiResult<ServiceInstance>.Ok(saved));
 });
 
 app.MapGet("/api/v1/service-instances/{instanceId}", (string instanceId, IServiceInstanceStore store) =>
@@ -241,6 +291,7 @@ app.MapGet("/api/v1/service-instances/{instanceId}", (string instanceId, IServic
 app.MapPost("/api/v1/service-instances/{instanceId}/apply", async (
     string instanceId,
     ServiceInstanceOperations operations,
+    HttpContext context,
     CancellationToken cancellationToken) =>
 {
     var operation = await operations.ExecuteAsync(instanceId, ServiceInstanceAction.Apply, cancellationToken);
@@ -249,6 +300,7 @@ app.MapPost("/api/v1/service-instances/{instanceId}/apply", async (
         return Results.NotFound(ApiResult<object>.Fail("NOT_FOUND", $"Instance '{instanceId}' was not found."));
     }
 
+    ManagementOperationAuditMiddleware.SetResourceId(context, operation.Instance.InstanceId);
     var result = operation.ListenerResult!;
     return result.Succeeded
         ? Results.Ok(ApiResult<ListenerApplyResult>.Ok(result))
@@ -258,6 +310,7 @@ app.MapPost("/api/v1/service-instances/{instanceId}/apply", async (
 app.MapPost("/api/v1/service-instances/{instanceId}/start", async (
     string instanceId,
     ServiceInstanceOperations operations,
+    HttpContext context,
     CancellationToken cancellationToken) =>
 {
     var operation = await operations.ExecuteAsync(instanceId, ServiceInstanceAction.Start, cancellationToken);
@@ -266,6 +319,7 @@ app.MapPost("/api/v1/service-instances/{instanceId}/start", async (
         return Results.NotFound(ApiResult<object>.Fail("NOT_FOUND", $"Instance '{instanceId}' was not found."));
     }
 
+    ManagementOperationAuditMiddleware.SetResourceId(context, operation.Instance.InstanceId);
     var result = operation.ListenerResult!;
     return result.Succeeded
         ? Results.Ok(ApiResult<ListenerApplyResult>.Ok(result))
@@ -275,6 +329,7 @@ app.MapPost("/api/v1/service-instances/{instanceId}/start", async (
 app.MapPost("/api/v1/service-instances/{instanceId}/stop", async (
     string instanceId,
     ServiceInstanceOperations operations,
+    HttpContext context,
     CancellationToken cancellationToken) =>
 {
     var operation = await operations.ExecuteAsync(instanceId, ServiceInstanceAction.Stop, cancellationToken);
@@ -283,6 +338,7 @@ app.MapPost("/api/v1/service-instances/{instanceId}/stop", async (
         return Results.NotFound(ApiResult<object>.Fail("NOT_FOUND", $"Instance '{instanceId}' was not found."));
     }
 
+    ManagementOperationAuditMiddleware.SetResourceId(context, operation.Instance.InstanceId);
     return Results.Ok(ApiResult<object>.Ok(new { instanceId, state = "Stopped" }));
 });
 
@@ -290,6 +346,7 @@ app.MapPost("/api/v1/service-instances/{instanceId}/restart-policy", async (
     string instanceId,
     RestartPolicyRequest request,
     ServiceInstanceOperations operations,
+    HttpContext context,
     CancellationToken cancellationToken) =>
 {
     var operation = await operations.ExecuteAsync(instanceId, ServiceInstanceAction.SetRestartPolicy, cancellationToken, request.AutoStart);
@@ -298,6 +355,7 @@ app.MapPost("/api/v1/service-instances/{instanceId}/restart-policy", async (
         return Results.NotFound(ApiResult<object>.Fail("NOT_FOUND", $"Instance '{instanceId}' was not found."));
     }
 
+    ManagementOperationAuditMiddleware.SetResourceId(context, operation.Instance.InstanceId);
     return Results.Ok(ApiResult<ServiceInstance>.Ok(operation.Instance));
 });
 
@@ -305,24 +363,12 @@ app.MapGet("/api/v1/listeners", (IListenerHost listenerHost) =>
     Results.Ok(ApiResult<IReadOnlyCollection<ListenerRuntimeStatus>>.Ok(listenerHost.GetStatuses())));
 
 app.MapInteractionEventEndpoints();
-
-app.MapGet("/api/v1/threats", (IThreatProfileStore store) =>
-{
-    var items = store.GetAll();
-    return Results.Ok(ApiResult<object>.Ok(new { items, total = items.Count, page = 1, pageSize = items.Count }));
-});
-
-app.MapGet("/api/v1/threats/by-ip/{sourceIp}", (string sourceIp, IThreatProfileStore store) =>
-{
-    var profile = store.GetByIp(sourceIp);
-    return profile is null
-        ? Results.NotFound(ApiResult<object>.Fail("NOT_FOUND", $"Threat IP '{sourceIp}' was not found."))
-        : Results.Ok(ApiResult<object>.Ok(profile));
-});
-
+app.MapThreatEndpoints();
 app.MapCredentialEvidenceEndpoints();
+app.MapPasswordBookEndpoints();
+app.MapManagementOperationAuditEndpoints();
 
-app.MapGet("/api/v1/metrics/summary", (IInteractionEventStore events, IThreatProfileStore threats, IListenerHost listenerHost) =>
+app.MapGet("/api/v1/metrics/summary", (IInteractionEventStore events, IThreatProfileStore threats, IListenerHost listenerHost, ReportIngestionHealth ingestion) =>
 {
     var allEvents = events.GetAll();
     return Results.Ok(ApiResult<object>.Ok(new
@@ -330,14 +376,28 @@ app.MapGet("/api/v1/metrics/summary", (IInteractionEventStore events, IThreatPro
         acceptedConnections = allEvents.Count(item => item.EventType == "ConnectionAccepted"),
         authenticationAttempts = allEvents.Count(item => item.EventType == "AuthenticationAttempted"),
         protocolViolations = allEvents.Count(item => item.EventType == "ProtocolViolation"),
-        threatIps = threats.GetAll().Count,
+        threatIps = threats.Count(),
         listeners = listenerHost.GetStatuses(),
+        eventStorage = EventStorageMetrics.From(ingestion),
     }));
 });
 
-app.MapGet("/api/v1/metrics/overview", (
-    IInteractionEventStore events, IThreatProfileStore threats, IListenerHost listenerHost, IServiceInstanceStore instances) =>
-    Results.Ok(ApiResult<OverviewMetrics>.Ok(OverviewMetricsReader.Read(events, threats, listenerHost, instances, DateTimeOffset.UtcNow, includeHost: true))));
+app.MapGet("/api/v1/metrics/overview", async (
+    IInteractionEventStore events, IThreatProfileStore threats, IListenerHost listenerHost, IServiceInstanceStore instances,
+    ReportIngestionHealth ingestion, SqliteReportService reports, TimeProvider clock, CancellationToken cancellationToken) =>
+{
+    var now = clock.GetUtcNow();
+    var activity = await reports.ReadOverviewActivityAsync(now, cancellationToken);
+    var metrics = OverviewMetricsReader.Read(events, threats, listenerHost, instances, now, includeHost: true);
+    return Results.Ok(ApiResult<OverviewMetrics>.Ok(metrics with
+    {
+        ActivityByHour = activity,
+        EventStorage = EventStorageMetrics.From(ingestion),
+    }));
+});
+
+app.MapOverviewConnectionsEndpoints();
+app.MapOverviewConnectionMapEndpoints();
 
 app.MapHub<HoneypotHub>("/hubs/honeypot");
 app.MapIPLocationEndpoints();

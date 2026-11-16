@@ -2,6 +2,16 @@ import base from '../en-US/events';
 
 export default {
   ...base,
+  'passwordBook.account': 'Conta',
+  'passwordBook.service': 'Serviço',
+  'passwordBook.authCount': 'Tentativas de autenticação',
+  'passwordBook.lastUsed': 'Último uso',
+  'passwordBook.loadingPassword': 'Carregando…',
+  'passwordBook.emptyPassword': '(senha vazia)',
+  'passwordBook.unavailablePassword': 'Evidência indisponível ou expirada',
+  'passwordBook.empty': 'Nenhuma senha registrada',
+  'passwordBook.unavailable': 'Registro de senhas indisponível',
+  'passwordBook.adminOnly': 'Somente administradores podem acessar o registro de senhas.',
   'events.type.AuthorizationDenied': 'Acesso negado',
   'credentials.password': 'Senha',
   'credentials.passwordNotCaptured': 'Senha em texto simples não capturada',

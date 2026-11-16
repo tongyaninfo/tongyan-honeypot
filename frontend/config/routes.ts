@@ -61,6 +61,13 @@ export default [
     component: './credentials',
   },
   {
+    path: '/password-book',
+    name: 'passwordBook',
+    icon: 'lock',
+    component: './password-book',
+    access: 'canAdmin',
+  },
+  {
     path: '/system',
     name: '系统管理',
     icon: 'setting',

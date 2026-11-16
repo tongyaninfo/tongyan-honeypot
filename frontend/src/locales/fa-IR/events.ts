@@ -2,6 +2,16 @@ import base from '../en-US/events';
 
 export default {
   ...base,
+  'passwordBook.account': 'حساب کاربری',
+  'passwordBook.service': 'سرویس',
+  'passwordBook.authCount': 'تعداد تلاش‌های احراز هویت',
+  'passwordBook.lastUsed': 'آخرین زمان استفاده',
+  'passwordBook.loadingPassword': 'در حال خواندن…',
+  'passwordBook.emptyPassword': '(گذرواژهٔ خالی)',
+  'passwordBook.unavailablePassword': 'شواهد در دسترس نیست یا منقضی شده است',
+  'passwordBook.empty': 'گذرواژه‌ای ثبت نشده است',
+  'passwordBook.unavailable': 'دفتر گذرواژه‌ها در دسترس نیست',
+  'passwordBook.adminOnly': 'فقط مدیران می‌توانند دفتر گذرواژه‌ها را مشاهده کنند.',
   'events.type.AuthorizationDenied': 'دسترسی رد شد',
   'credentials.password': 'گذرواژه',
   'credentials.passwordNotCaptured': 'گذرواژه به‌صورت متن ساده ثبت نشده است',
