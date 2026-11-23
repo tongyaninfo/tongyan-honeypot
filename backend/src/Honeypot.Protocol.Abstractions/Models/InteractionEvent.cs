@@ -38,6 +38,11 @@ public sealed record InteractionEvent
     public int? AuthenticationAttempt { get; init; }
     public string? MaterialType { get; init; }
     public string? CredentialCaptureStatus { get; init; }
+    /// <summary>适配器已提取的证据表示长度（字节），与 TCP 帧长度分别计算。</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? CredentialMaterialBytes { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? CredentialCaptureError { get; init; }
     public bool CaptureTruncated { get; init; }
     public int RiskDelta { get; init; }
     public string? RuleVersion { get; init; }

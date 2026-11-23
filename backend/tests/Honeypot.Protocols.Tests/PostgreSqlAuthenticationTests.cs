@@ -91,7 +91,9 @@ public sealed class PostgreSqlAuthenticationTests
             AuthenticationTestServer.Profile("postgresql") with { PostgreSqlAuthenticationMethod = "password" }, sink);
         Assert.Empty(sink.Evidence);
         Assert.Contains(sink.Events, x => x.EventType == "CredentialCaptureFailed");
-        Assert.DoesNotContain(sink.Events, x => x.EventType == "AuthenticationAttempted");
+        var attempted = Assert.Single(sink.Events, e => e.EventType == "AuthenticationAttempted");
+        Assert.Equal("Failed", attempted.CredentialCaptureStatus);
+        Assert.Null(attempted.CredentialArtifactId);
         Assert.DoesNotContain(session.Writes, x => x[0] == 'E');
     }
 

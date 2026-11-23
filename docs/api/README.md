@@ -33,10 +33,10 @@
 - `POST /api/v1/service-instances/{id}/stop`：停止实例全部监听。
 - `POST /api/v1/service-instances/{id}/restart-policy` 接收 `{ "autoStart": true }` 或关闭值，保存重启恢复策略并返回服务实例。实例的期望运行状态由启停操作维护。
 - `GET /api/v1/listeners`：监听器运行状态。
-- `GET /api/v1/metrics/overview`：运行总览聚合指标、适配器分布、结果分布、24 小时趋势和监听器明细。`activityByHour` 从 SQLite 报表事实取当前小时及之前 23 个小时的连接和认证失败数，使用 UTC 小时键。认证失败沿用报表的 `failure`、`rejected`、`invalid` 口径。每小时的 `coverageStatus` 为 `complete`、`partial` 或 `unknown`，无已记录事件且无采集覆盖时计数为 `null`；部分覆盖时数值仅反映已记录事件。
-- `GET /api/v1/metrics/overview/connections`：运行总览的分页连接明细，支持 `scope/page/pageSize`。
-- `GET /api/v1/metrics/overview/connection-map`：运行总览的连接地图快照，默认最近 10 分钟，可用 `windowSeconds` 切换。
-- `GET /api/v1/events` 查询事件，可通过 `view=activity` 获取威胁事件页所用的行为列表。`GET /api/v1/connections/{connectionId}/events` 查询该连接的原始事件步骤。
+- `GET /api/v1/metrics/overview` 返回首页指标、协议活动、小时趋势、监听器明细及统计时点 `generatedAtUtc`。`GET /api/v1/metrics/summary` 返回最近 24 小时的接纳连接、认证尝试、协议异常及当前威胁档案、监听器、存储状态。
+- `GET /api/v1/metrics/overview/connections` 根据卡片或协议指标分页查询连接，支持 `scope/page/pageSize/asOfUtc`。
+- `GET /api/v1/metrics/overview/connection-map` 返回已接纳连接的地图快照，默认最近 10 分钟，可用 `windowSeconds` 切换。
+- `GET /api/v1/events?view=activity` 供首页最近活动和威胁事件页使用。按连接追溯时，`GET /api/v1/connections/{connectionId}/summary` 返回连接摘要，`GET /api/v1/connections/{connectionId}/events` 返回仍在留存期内的完整脱敏步骤。
 - `GET /api/v1/threats`、`GET /api/v1/threats/by-ip/{ip}`：威胁清单查询。
 - `GET /api/v1/credential-evidence` 查询认证证据摘要。`GET /api/v1/credential-evidence/{credentialArtifactId}` 和 `GET /api/v1/credential-evidence/audit` 分别供管理员读取单份证据原文和访问审计。
 - `GET /api/v1/password-book`：管理员按 `keyword/page/pageSize` 查询密码组合、认证次数及最近使用时间。
@@ -48,17 +48,28 @@
 
 ## 运行总览连接明细
 
-`scope=active` 查询监听器当前的活动连接；`accepted` 查询仍留存的连接接纳事件；`authenticationFailures` 查询北京时间今日且结果为 `failure` 的认证事件，同一连接的多次失败分别计数；`threatConnections` 对当前威胁清单中有留存连接的来源各取最近一条。活动连接由监听器运行时跟踪，无需根据历史事件推断。
+客户端将首页返回的 `generatedAtUtc` 原样作为 `asOfUtc` 传给下钻，翻页时沿用该值。省略时使用当前时间。SQLite 对持久化指标按事件时间截止和当前留存范围筛选。
 
-结果按时间倒序分页，同一时间按 `id` 升序排列。每行包含 `id / connectionId / occurredAtUtc / sourceIp / sourcePort / adapterKey / destinationPort`。缺少 `scope` 或传入未识别的值时返回 HTTP 400 和 `INVALID_SCOPE`。威胁 IP 指标包含没有留存连接的来源，这些来源不会出现在连接明细里。
+| `scope` | 首页字段 | 明细口径 |
+| --- | --- | --- |
+| `active` | `activeConnections` | 由监听器直接观测。带 `asOfUtc` 取首页采样时的活动连接，同一页组内后来新建或关闭的连接不改变结果。省略时查询当前活动连接。 |
+| `accepted` | `acceptedConnections` | 截止时点向前滚动 24 小时，每个有实际接纳记录的连接一行。准入拒绝另有连接摘要。 |
+| `authenticationFailures` | `todayAuthenticationFailures` | 从北京时间当日零时到截止时点，每条结果为 `failure`、`rejected` 或 `invalid` 的 `AuthenticationAttempted` 一行。一个连接的多次认证分别计数。 |
+| `threatConnections` | `traceableThreatIpCount` | 有效威胁档案中有可追溯连接的来源各一行，展示其最近连接。仅观察到准入拒绝的来源也可下钻。`threatIpCount` 包含所有有效档案，两者的差值是缺少可回看连接的档案数。 |
 
-`scope=adapterActivity` 使用 `adapterKey` 筛选协议，并通过 `metric` 指定 `acceptedConnections`、`authenticationFailures`、`sourceIpCount` 或 `protocolViolations`。时间窗口和「协议活动」表一致，取包含当前小时的最近 24 个小时桶。来源 IP 数按地址去重，每个地址展示最近一条匹配活动。协议异常明细可返回诊断摘要。
+活动连接快照在当前 API 进程内保留 5 分钟，同一秒内的首页请求可共用一次采样。携带过期、进程重启前或无法识别的时点查询 `scope=active` 会返回 HTTP 410 和 `OVERVIEW_SNAPSHOT_EXPIRED`。客户端应刷新首页，用新返回的时点重新打开下钻。
 
-总览连接明细复用现有 IP 归属地解析。认证失败明细可返回 `username / credentialArtifactId / materialType`。管理员通过单条认证证据接口查看已采集的密码，每次读取都有审计。
+`scope=adapterActivity` 使用 `adapterKey` 筛选协议，`metric` 指定 `acceptedConnections`、`authenticationFailures`、`sourceIpCount` 或 `protocolViolations`。窗口从 23 小时前的整点起，到统计时点为止。来源 IP 在接纳连接、认证失败和协议异常的合集中按地址去重，每个地址展示最近一条匹配活动。
+
+`activityByHour` 的 UTC 小时键覆盖当前及此前 23 个小时，统计报表事实中的接纳连接和认证失败。`coverageStatus` 为 `complete`、`partial` 或 `unknown`。无采集覆盖也无事件的小时计数为 `null`，部分覆盖只显示已记录数量。若旧版库有仅存报表的事实，小时趋势仍包含这些记录，`reportOnlyEvents` 给出过去 24 小时的此类事件数。可下钻卡片和协议活动只纳入可以定位到连接或事件的记录。
+
+连接明细按时间倒序、同一时间按 `id` 升序分页，返回 `items/total/page/pageSize`。每行含 `id/connectionId/occurredAtUtc/sourceIp/sourcePort/adapterKey/destinationPort`。认证失败可带 `username/credentialArtifactId/materialType`，协议异常可带诊断摘要。未知或缺少 `scope` 返回 HTTP 400 和 `INVALID_SCOPE`。查看已采集的认证原文须使用单条证据接口，并接受服务端权限检查和读取审计。
+
+首页和指标摘要都返回 `eventStorage`。`lockRetries` 记录锁冲突后的应用重试，`rejectedEvents` 记录最终未持久化的事件。`writeFailuresByCode` 按错误码累计，`faultsByStage` 可区分失败位置、最近失败和后续恢复。数据库占用和文件系统可用空间分别见 `databaseBytes` 和 `freeDiskBytes`，`diskSpaceStatus` 表示余量状态。兼容字段 `diskBudgetBlocked` 表示观测到实际的 SQLite 存储空间耗尽，证据和事件写入已取消预设容量配额。
 
 ## 运行总览连接地图
 
-`GET /api/v1/metrics/overview/connection-map` 需要当前登录会话，设置 `Cache-Control: no-store`。`windowSeconds` 支持 `60`、`600`、`7200`、`86400`，默认 `600`，其他值返回 HTTP 400 和 `INVALID_WINDOW`。统计窗口包含起点和终点，从有界近期事件快照筛选 `ConnectionAccepted`，同一连接计一次。响应不包含账号、认证材料或报文。
+`GET /api/v1/metrics/overview/connection-map` 需要当前登录会话，设置 `Cache-Control: no-store`。`windowSeconds` 支持 `60`、`600`、`7200`、`86400`，默认 `600`，其他值返回 HTTP 400 和 `INVALID_WINDOW`。SQLite 从连接摘要中读取接纳时刻落在窗口内的全部连接，含起点和终点，每个连接计一次。后续握手、认证、关闭和准入拒绝不会增加地图计数。
 
 | 字段 | 说明 |
 | --- | --- |
@@ -69,17 +80,23 @@
 | `events` | 最近 100 条具有有效坐标的连接，供实时飞线匹配和旧客户端使用。每条含 `id/occurredAtUtc/adapterKey/latitude/longitude/locationLabel/sourceIp/country`，`sourceIp` 为规范化公网 IP，`country` 缺失时为空。`locationSource/locationVersion` 随定位结果提供。 |
 | `coverage` | `observed` 为时间窗和快照内去重连接总数，等于 `mapped + unknown + private + pending`。`mapped` 为有坐标，`unknown` 为缺坐标、定位未启用或不可定位，`private` 为私网及其他特殊用途地址。`pending` 包含等待解析和等待入队，`deferred` 为其中尚在等待入队的连接。`omitted` 等于 `mapped - events.length`，用于兼容旧版；超出飞线列表的已定位连接仍汇总到 `origins`。 |
 
-首次打开查询窗口快照，页面经 `eventAppended` 接到接纳事件后合并刷新。每次检查所有候选 IP 的缓存，新 IP 最多 128 个按现有队列容量逐步入队。地图覆盖受近期事件快照的条数、时间边界、采集情况和数据源有效坐标影响。详见 [实时飞线地图实施方案](../spec/实时飞线地图实施方案.md)。
+首次打开查询窗口快照，页面经 `eventAppended` 接到接纳事件后合并刷新。每次检查所有候选 IP 的缓存，新 IP 最多 128 个按现有队列容量逐步入队。悬停来源点使用响应中的来源汇总。100 条飞线仅限制动画，窗口统计与地点汇总覆盖全部符合条件的连接。详见 [实时飞线地图实施方案](../spec/实时飞线地图实施方案.md)。
 
 ## 威胁事件查询
 
-`GET /api/v1/events` 接受 `sourceIp`、`adapterKey`、`destinationPort` 和 `eventType` 筛选。省略 `view` 或传入 `view=raw` 时返回原始事件。未识别的 `view` 值返回 HTTP 400 和 `INVALID_VIEW`。
+`GET /api/v1/events` 接受 `sourceIp`、`adapterKey`、`destinationPort`、`eventType` 和 `connectionIds` 筛选。`connectionIds` 为逗号分隔的连接 ID，最多 100 个。省略 `view` 或传入 `view=raw` 时逐条返回仍可回看的脱敏事件。未识别的 `view` 值返回 HTTP 400 和 `INVALID_VIEW`。
 
-`view=activity` 按 `connectionId` 关联步骤。一条连接内的每次认证尝试分别返回一行。没有进入认证的连接返回一行，优先展示存储降级或协议异常等诊断，否则展示连接建立。来源相同或时间接近的不同连接分别保留。`eventType` 在投影后按代表事件筛选。
+`view=activity` 按 `connectionId` 关联步骤，每次 `AuthenticationAttempted` 或 `AuthorizationDenied` 各返回一行。单纯访问拒绝保留在活动列表中，认证次数只统计实际认证尝试。没有上述事件的连接返回一条代表事件，优先展示存储降级、协议异常等诊断，其次展示接纳或准入拒绝。`eventType` 在选出代表事件后筛选。首页只取所请求页的展示字段。
 
-活动条目的 `eventId` 指向代表事件，`eventCount` 表示该连接的事件步骤数量。客户端可使用 `connectionId` 查看完整步骤，用 `credentialArtifactId` 关联认证证据。两个视图的 `total` 均按所选视图和筛选条件统计，原始事件、威胁计数及证据存储独立于列表视图。
+活动条目的 `eventId` 指向实际事件。常规活动列表中的 `eventCount` 表示该连接累计观测步数，`connectionCloseObserved` 表示是否记录了关闭。显式按 `connectionIds` 筛选时，`eventCount` 统计筛选范围内仍可回看的步骤。两个视图的 `total` 均按当前视图和筛选条件统计。
 
-MSSQL 的 `ProtocolViolation` 原始步骤可包含固定 `protocolErrorCode`。连接详情使用该码显示失败阶段，普通登录拒绝继续通过 `authenticationFailureCode` 返回 `18456`。历史事件没有分阶段错误码时继续显示原摘要。
+常规活动列表只计仍可回看的认证或代表事件。若代表事件已到期、该连接的关闭记录仍在留存期内，仍可按连接 ID 查看摘要和剩余步骤。
+
+`GET /api/v1/connections/{connectionId}/summary` 返回连接两端、监听器、服务实例、`admissionOutcome/admissionReason/admittedAtUtc`、最后一次协议阶段和 `closedAtUtc/closeReason`。`observedCount` 是已持久化的累计步骤数，`availableCount` 是当前可回看明细数，客户端可用同一连接的 `/events` 按序读取每条明细。未观测到关闭时，关闭时刻和原因均为空，重启时也不会推断断开。只存旧报表的记录无法恢复连接。摘要缺失或已过期时返回 HTTP 404 和 `CONNECTION_NOT_FOUND`。
+
+新写入且明确识别为正常的无证据握手步骤默认保留 48 小时。准入、逐次认证、异常、关闭和旧版明细默认保留 30 天。连接摘要从最后一次接收起保留 30 天。普通握手过期后，仍可通过摘要检查累计步数和最后阶段，通过认证事件的 `credentialArtifactId` 访问权限范围内的证据。
+
+MSSQL 的 `ProtocolViolation` 原始步骤可包含固定 `protocolErrorCode`。连接详情使用该码显示失败阶段，普通登录拒绝继续通过 `authenticationFailureCode` 返回 `18456`。历史事件没有分阶段错误码时继续显示原摘要。[协议认证补全实施方案](../spec/协议认证补全实施方案.md)
 
 ## 认证证据访问
 
@@ -103,7 +120,7 @@ MSSQL 的 `ProtocolViolation` 原始步骤可包含固定 `protocolErrorCode`。
 
 管理台按单服务器、单适配器实例展示服务卡片；实例默认监听 `0.0.0.0`，端口可以配置多个。端口输入仅修改页面草稿，点击“应用端口”后才写入服务端；启动/停止共用一个按运行状态切换的按钮。
 
-真实传感器上报、细粒度 RBAC、登录/封禁/解封事件告警和自动阻断接口尚未建立。事件详情、威胁档案、认证证据、证据访问审计和关键管理操作已接入 SQLite。部署完成情况以各环境的验证结果为准。
+真实传感器上报、细粒度 RBAC、登录/封禁/解封事件告警和自动阻断接口尚未建立。事件详情、威胁档案、认证证据、证据访问审计和关键管理操作已接入 SQLite。部署完成情况以对应环境的验收记录为准。
 
 ## 用户体系接口
 

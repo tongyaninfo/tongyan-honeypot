@@ -21,6 +21,7 @@ public sealed class RedisAdapter : ProtocolAdapterBase
     {
         var close = SessionCloseReason.AdapterCompleted;
         var attempts = 0;
+        var waitingForFirstCommand = true;
         try
         {
             for (var requests = 0; requests < 128 && attempts < profile.MaxAuthenticationAttempts; requests++)
@@ -31,6 +32,7 @@ public sealed class RedisAdapter : ProtocolAdapterBase
                 var reader = new RespReader(session, profile.MaxFrameBytes);
                 var args = await reader.CommandAsync(ct);
                 if (args is null) break;
+                waitingForFirstCommand = false;
                 if (args.Count == 0) continue;
                 var command = Encoding.UTF8.GetString(args[0]).ToUpperInvariant();
                 byte[]? user = null, password = null;
@@ -80,7 +82,11 @@ public sealed class RedisAdapter : ProtocolAdapterBase
             }
         }
         catch (AuthenticationRecordingException) { close = SessionCloseReason.StorageDegraded; }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { close = SessionCloseReason.IdleTimeout; }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            // 首条指令尚未收齐属于握手超时，后续指令的等待才属于会话空闲。
+            close = waitingForFirstCommand ? SessionCloseReason.HandshakeTimeout : SessionCloseReason.IdleTimeout;
+        }
         catch (InvalidDataException)
         {
             close = SessionCloseReason.ProtocolViolation;

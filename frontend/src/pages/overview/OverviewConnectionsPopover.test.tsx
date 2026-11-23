@@ -18,6 +18,7 @@ import {
 import { ipLocationClient } from '@/services/honeypot/ipLocationClient';
 import { AdapterActivityCard } from './OverviewActivityTables';
 import OverviewConnectionsPopover from './OverviewConnectionsPopover';
+import OverviewHeader from './OverviewHeader';
 
 const access = vi.hoisted(() => ({ canAdmin: true }));
 vi.mock('@umijs/max', () => ({ useAccess: () => access, Link: () => null }));
@@ -31,6 +32,13 @@ vi.mock('@/services/honeypot/api', () => ({
 const getConnections = vi.mocked(getOverviewConnections);
 const getEvidence = vi.mocked(getCredentialEvidence);
 const getLocations = vi.mocked(resolveIPLocations);
+
+it('提示用户刷新已过期的活动连接快照', async () => {
+  getConnections.mockRejectedValue({ response: { status: 410 } });
+  render(<OverviewConnectionsPopover label="活动连接" scope="active" asOfUtc="2026-11-15T01:00:00Z">活动连接</OverviewConnectionsPopover>);
+  fireEvent.click(screen.getByRole('button', { name: '活动连接' }));
+  expect(await screen.findByText('活动连接快照已过期，请刷新首页后重新打开明细。')).toBeInTheDocument();
+});
 
 beforeEach(() => {
   getLocations.mockImplementation(async (ips) => ({
@@ -56,6 +64,19 @@ afterEach(() => {
   getConnections.mockReset();
   getEvidence.mockReset();
   getLocations.mockReset();
+});
+
+it('首页卡片采用近 24 小时接纳数以及有可追溯连接的来源数', () => {
+  render(<OverviewHeader metricsAvailable loading={false} metrics={{
+    generatedAtUtc: '2026-11-15T01:30:00Z', eventCount: 20, acceptedConnections: 8, acceptedCount: 120,
+    authenticationAttempts: 0, authenticationFailures: 0, protocolViolations: 0, sessionClosed: 0,
+    threatIpCount: 5, traceableThreatIpCount: 3, serviceInstanceCount: 1, listenerCount: 1,
+    runningListenerCount: 1, failedListenerCount: 0, activeConnections: 1, listenerErrorCount: 0,
+    eventsByAdapter: [], eventsByOutcome: [], eventsByHour: [], listeners: [],
+  }} />);
+  expect(screen.getByRole('button', { name: /近 24 小时接纳连接/ })).toHaveTextContent('8');
+  expect(screen.getByRole('button', { name: /威胁 IP/ })).toHaveTextContent('3');
+  expect(screen.getByText('另有 2 个活跃档案缺少留存的连接明细')).toBeInTheDocument();
 });
 
 function result(
@@ -117,11 +138,12 @@ it('悬停加载对应指标，移入气泡后可以翻页，关闭重开返回�
         }),
     )
     .mockResolvedValueOnce(result(1, '192.0.2.1'));
-  render(
-    <OverviewConnectionsPopover label="活动连接" scope="active">
-      活动连接
-    </OverviewConnectionsPopover>,
-  );
+  const cardAt = (asOfUtc: string) => <OverviewConnectionsPopover label="活动连接" scope="active" asOfUtc={asOfUtc}>
+    活动连接
+  </OverviewConnectionsPopover>;
+  const first = '2026-11-15T01:00:00Z';
+  const refreshed = '2026-11-15T01:01:00Z';
+  const view = render(cardAt(first));
   const trigger = screen.getByRole('button', { name: '活动连接' });
   expect(getConnections).not.toHaveBeenCalled();
 
@@ -129,16 +151,19 @@ it('悬停加载对应指标，移入气泡后可以翻页，关闭重开返回�
   expect(await screen.findByText('192.0.2.1')).toBeInTheDocument();
   expect(getConnections).toHaveBeenLastCalledWith({
     scope: 'active',
+    asOfUtc: first,
     page: 1,
     pageSize: 5,
   });
 
   const popup = screen.getByRole('dialog', { name: '活动连接' });
+  view.rerender(cardAt(refreshed));
   fireEvent.mouseLeave(trigger);
   fireEvent.mouseEnter(popup);
   fireEvent.click(screen.getByTitle('2'));
   expect(getConnections).toHaveBeenLastCalledWith({
     scope: 'active',
+    asOfUtc: first,
     page: 2,
     pageSize: 5,
   });
@@ -154,6 +179,7 @@ it('悬停加载对应指标，移入气泡后可以翻页，关闭重开返回�
   expect(trigger).toHaveAttribute('aria-expanded', 'false');
   fireEvent.click(trigger);
   expect(await screen.findByText('192.0.2.1')).toBeInTheDocument();
+  expect(getConnections).toHaveBeenLastCalledWith({ scope: 'active', asOfUtc: refreshed, page: 1, pageSize: 5 });
 });
 
 it('关闭后迟到的旧请求不会覆盖重开的明细', async () => {
@@ -317,7 +343,8 @@ it.each([
 
 it('点击协议来源数字，按协议和指标请求分页并显示每个 IP 的归属地', async () => {
   getConnections.mockResolvedValue(result(1, '192.0.2.1', { eventType: 'ProtocolViolation' }));
-  render(<AdapterActivityCard loading={false} activity={[{
+  const asOfUtc = '2026-11-15T01:30:00Z';
+  render(<AdapterActivityCard loading={false} asOfUtc={asOfUtc} activity={[{
     adapterKey: 'redis',
     acceptedConnections: 0,
     authenticationFailures: 0,
@@ -333,7 +360,7 @@ it('点击协议来源数字，按协议和指标请求分页并显示每个 IP 
   expect(await dialog.findByRole('cell', { name: '示例国家 · 示例城市' })).toBeInTheDocument();
   expect(dialog.getByRole('cell', { name: '协议异常' })).toBeInTheDocument();
   expect(getConnections).toHaveBeenLastCalledWith({
-    scope: 'adapterActivity', adapterKey: 'redis', metric: 'sourceIpCount', page: 1, pageSize: 5,
+    scope: 'adapterActivity', adapterKey: 'redis', metric: 'sourceIpCount', asOfUtc, page: 1, pageSize: 5,
   });
 });
 

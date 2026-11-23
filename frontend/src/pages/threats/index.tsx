@@ -4,7 +4,7 @@ import type { ColumnsType } from 'antd/es/table';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import ExcelExportButton from '@/components/ExcelExportButton';
 import SourceIp from '@/components/SourceIp';
-import { getThreats, loadExportRows, normalizePage, type PageResult, type ThreatIpProfile } from '@/services/honeypot/api';
+import { getThreats, loadExportRows, normalizePage, pageFromResponse, type PageResult, type ThreatIpProfile } from '@/services/honeypot/api';
 import { useRealtimeRefresh } from '@/hooks/useRealtimeRefresh';
 
 const statusColors: Record<string, string> = {
@@ -39,7 +39,7 @@ const ThreatsPage: React.FC = () => {
     try {
       const response = await getThreats({ page, pageSize: 20 });
       if (requestId.current !== id) return;
-      const result = normalizePage(response.data);
+      const result = pageFromResponse(response);
       if (page > 1 && result.items.length === 0) setPage(Math.max(1, Math.ceil(result.total / 20)));
       setSnapshot(result);
       setError(undefined);
@@ -73,7 +73,6 @@ const ThreatsPage: React.FC = () => {
     <div>
       <Typography.Title level={3}>{t('title')}</Typography.Title>
       <Typography.Paragraph type="secondary">{t('description')}</Typography.Paragraph>
-      {error !== undefined && <Alert title={t('unavailable')} description={error} type="warning" showIcon style={{ marginBottom: 16 }} />}
       <Card extra={
         <ExcelExportButton
           filename={t('title')}
@@ -108,7 +107,10 @@ const ThreatsPage: React.FC = () => {
           disabled={loading || error !== undefined || rows.length === 0}
         />
       }>
-        {loading && rows.length === 0 ? <Spin /> : rows.length === 0 ? <Empty description={t('empty')} /> : <Table rowKey="threatId" loading={loading} dataSource={rows} columns={columns} pagination={{ current: page, pageSize: 20, total, showSizeChanger: false, onChange: setPage }} scroll={{ x: 1250 }} />}
+        {error !== undefined && <Alert title={t('unavailable')} description={error} type="warning" showIcon style={{ marginBottom: 16 }} />}
+        {loading && rows.length === 0 && <Spin />}
+        {!loading && error === undefined && rows.length === 0 && <Empty description={t('empty')} />}
+        {rows.length > 0 && <Table rowKey="threatId" loading={loading} dataSource={rows} columns={columns} pagination={{ current: page, pageSize: 20, total, showSizeChanger: false, onChange: setPage }} scroll={{ x: 1250 }} />}
       </Card>
     </div>
   );

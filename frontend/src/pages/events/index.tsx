@@ -5,18 +5,18 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import CredentialEvidenceModal, { type CredentialEvidenceTarget } from '@/components/CredentialEvidenceModal';
 import ExcelExportButton from '@/components/ExcelExportButton';
 import SourceIp from '@/components/SourceIp';
-import { getConnectionEvents, getEvents, loadExportRows, normalizePage, type InteractionEvent, type PageResult } from '@/services/honeypot/api';
+import { getConnectionEvents, getEvents, loadExportRows, normalizePage, pageFromResponse, type InteractionEvent, type PageResult } from '@/services/honeypot/api';
 import { useRealtimeRefresh } from '@/hooks/useRealtimeRefresh';
 
 const outcomeColors: Record<string, string> = {
-  completed: 'green', failure: 'red', rejected: 'red', invalid: 'orange',
+  completed: 'green', failure: 'red', rejected: 'red', admission_rejected: 'red', invalid: 'orange',
   observed: 'blue', sent: 'cyan', recorded: 'green', client_closed: 'default',
   unsupported: 'orange', timeout: 'orange', malformed: 'orange', storage_failed: 'red',
 };
 
 const eventTypes = [
   'AuthenticationAttempted', 'AuthorizationDenied', 'AuthenticationRequired', 'HandshakeTimeout',
-  'ConnectionAccepted', 'ProtocolViolation', 'ResourceLimitExceeded', 'CredentialCaptureFailed',
+  'ConnectionAccepted', 'ConnectionRejected', 'ProtocolViolation', 'ResourceLimitExceeded', 'CredentialCaptureFailed',
 ];
 
 const protocolFailureStages = new Map([
@@ -35,9 +35,14 @@ const EventActivityList: React.FC<{ initialSourceIp: string; initialEventType?: 
   const timeLabel = (value: string) => new Date(value).toLocaleString(intl.locale, { timeZone: 'Asia/Shanghai' });
   const accountLabel = (record: InteractionEvent) => record.username ? `${record.domain ? `${record.domain}\\` : ''}${record.username}` : t('noAccount');
   const outcomeLabel = (value: string) => intl.formatMessage({ id: `events.outcome.${value.toLowerCase()}`, defaultMessage: t('unknown') });
-  const materialLabel = (record: InteractionEvent) => record.credentialArtifactId
-    ? `${intl.formatMessage({ id: `events.material.${record.materialType}`, defaultMessage: t('material.unknown') })} · ${t('capture.saved')}`
-    : t(record.credentialCaptureStatus === 'Disabled' ? 'capture.disabled' : 'capture.none');
+  const materialLabel = (record: InteractionEvent) => {
+    if (record.credentialArtifactId)
+      return `${intl.formatMessage({ id: `events.material.${record.materialType}`, defaultMessage: t('material.unknown') })} · ${t('capture.saved')}`;
+    if (record.credentialCaptureStatus === 'Failed')
+      return [t('capture.failed'), record.credentialCaptureError, record.credentialMaterialBytes == null ? null :
+        intl.formatMessage({ id: 'events.capture.bytes' }, { count: record.credentialMaterialBytes })].filter(Boolean).join(' · ');
+    return t(record.credentialCaptureStatus === 'Disabled' ? 'capture.disabled' : 'capture.none');
+  };
   const [snapshot, setSnapshot] = useState<{ result: PageResult<InteractionEvent>; sourceIp: string; eventType?: string }>({ result: normalizePage(undefined), sourceIp: '' });
   const { items: rows, total } = snapshot.result;
   const [page, setPage] = useState(1);
@@ -58,7 +63,7 @@ const EventActivityList: React.FC<{ initialSourceIp: string; initialEventType?: 
     try {
       const response = await getEvents({ sourceIp, eventType, view: 'activity', page, pageSize: 20 });
       if (requestId.current !== currentRequest) return;
-      const result = normalizePage(response.data);
+      const result = pageFromResponse(response);
       if (page > 1 && result.items.length === 0) setPage(Math.max(1, Math.ceil(result.total / 20)));
       setSnapshot({ result, sourceIp, eventType });
       setError(false);
@@ -82,7 +87,11 @@ const EventActivityList: React.FC<{ initialSourceIp: string; initialEventType?: 
     setStepsLoading(Boolean(connection));
     if (connection) {
       void getConnectionEvents(connection.connectionId)
-        .then((response) => { if (active) setSteps(normalizePage(response.data).items); })
+        .then((response) => {
+          if (!active) return;
+          if (response.success) setSteps(normalizePage(response.data).items);
+          else setStepsError(true);
+        })
         .catch(() => { if (active) setStepsError(true); })
         .finally(() => { if (active) setStepsLoading(false); });
     }
@@ -101,6 +110,8 @@ const EventActivityList: React.FC<{ initialSourceIp: string; initialEventType?: 
   };
   const resultCell = (value?: string) => value ? <Tag color={outcomeColors[value.toLowerCase()] ?? 'default'}>{outcomeLabel(value)}</Tag> : '-';
   const stepSummary = (record: InteractionEvent) => {
+    if (record.payloadSummary && (record.eventType === 'ConnectionRejected' || record.outcome === 'admission_rejected'))
+      return intl.formatMessage({ id: `events.admission.${record.payloadSummary}`, defaultMessage: record.payloadSummary });
     const code = record.protocolErrorCode;
     const stage = record.adapterKey?.toLowerCase() === 'mssql' && code ? protocolFailureStages.get(code) : undefined;
     if (!stage) return record.payloadSummary;
@@ -183,9 +194,11 @@ const EventActivityList: React.FC<{ initialSourceIp: string; initialEventType?: 
           }}
         />
       </Space>
-      {error && <Alert title={t('unavailable')} type="warning" showIcon style={{ marginBottom: 16 }} />}
       <Card>
-        {loading && rows.length === 0 ? <Spin /> : rows.length === 0 ? <Empty description={t('empty')} /> : <Table rowKey="eventId" loading={loading} dataSource={rows} columns={columns} pagination={{ current: page, pageSize: 20, total, showSizeChanger: false, onChange: setPage }} scroll={{ x: 1860 }} />}
+        {error && <Alert title={t('unavailable')} type="warning" showIcon style={{ marginBottom: 16 }} />}
+        {loading && rows.length === 0 && <Spin />}
+        {!loading && !error && rows.length === 0 && <Empty description={t('empty')} />}
+        {rows.length > 0 && <Table rowKey="eventId" loading={loading} dataSource={rows} columns={columns} pagination={{ current: page, pageSize: 20, total, showSizeChanger: false, onChange: setPage }} scroll={{ x: 1860 }} />}
       </Card>
       <Modal title={t('details')} open={Boolean(connection)} onCancel={() => setConnection(null)} footer={null} width={1000} destroyOnHidden>
         {connection && <Descriptions column={2} size="small" items={[
@@ -199,6 +212,14 @@ const EventActivityList: React.FC<{ initialSourceIp: string; initialEventType?: 
           { key: 'material', label: t('material'), children: materialCell(connection), span: 2 },
         ]} />}
         {stepsError && <Alert title={t('unavailable')} type="warning" />}
+        {connection && !stepsLoading && !stepsError && <Space orientation="vertical" size={2} style={{ marginBlock: 12 }}>
+          <Typography.Text>{intl.formatMessage({ id: 'events.trace.counts' }, {
+            observed: Math.max(connection.eventCount ?? 0, steps.length), available: steps.length,
+          })}</Typography.Text>
+          {(connection.eventCount ?? 0) > steps.length && <Typography.Text type="secondary">{t('trace.retention')}</Typography.Text>}
+          {connection.connectionCloseObserved === false && !steps.some((step) => step.eventType === 'SessionClosed') &&
+            <Typography.Text type="warning">{t('trace.closeUnknown')}</Typography.Text>}
+        </Space>}
         <Table rowKey="eventId" size="small" loading={stepsLoading} dataSource={steps} pagination={false} scroll={{ x: 850 }} columns={[
           { title: t('time'), dataIndex: 'occurredAtUtc', render: timeLabel, width: 180 },
           { title: t('event'), dataIndex: 'eventType', render: eventLabel, width: 200 },

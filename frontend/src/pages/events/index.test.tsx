@@ -127,7 +127,42 @@ describe('threat activity list', () => {
     expect(await screen.findByText('安全握手完成')).toBeInTheDocument();
     expect(screen.getByText('凭据认证挑战已发送')).toBeInTheDocument();
     expect(screen.getByText('会话关闭')).toBeInTheDocument();
+    expect(screen.getByText('共观测 8 步，当前可查看 5 步')).toBeInTheDocument();
+    expect(screen.getByText(/部分步骤明细已到期/)).toBeInTheDocument();
+    expect(screen.queryByText(/关闭状态未知/)).not.toBeInTheDocument();
     expect(api.getConnectionEvents).toHaveBeenCalledWith('conn-1');
+    expect(api.getCredentialEvidence).not.toHaveBeenCalled();
+  });
+
+  it('marks unobserved closure and shows the specific admission rejection', async () => {
+    const rejected = { ...login, eventType: 'ConnectionRejected', eventCount: 1, connectionCloseObserved: false,
+      credentialCaptureStatus: 'None', credentialArtifactId: undefined, outcome: 'rejected', payloadSummary: 'source_concurrency' };
+    vi.mocked(api.getEvents).mockResolvedValue(ok({ items: [rejected], total: 1, page: 1, pageSize: 20 }));
+    vi.mocked(api.getConnectionEvents).mockResolvedValue(ok([rejected]));
+    session.search = '?eventType=ConnectionRejected';
+    render(<EventsPage />);
+    fireEvent.click(await screen.findByRole('button', { name: '1 个步骤' }));
+    expect(await screen.findByText('该来源并发连接已满')).toBeInTheDocument();
+    expect(screen.getByText(/关闭状态未知/)).toBeInTheDocument();
+    expect(screen.queryByText(/部分步骤明细已到期/)).not.toBeInTheDocument();
+    expect(api.getEvents).toHaveBeenCalledWith(expect.objectContaining({ eventType: 'ConnectionRejected' }));
+  });
+
+  it('does not infer expired steps from a failed detail request', async () => {
+    vi.mocked(api.getConnectionEvents).mockResolvedValue({ success: false, code: 'FAILED', message: '', data: [] });
+    render(<EventsPage />);
+    fireEvent.click(await screen.findByRole('button', { name: '8 个步骤' }));
+    expect(await screen.findByText('事件接口暂不可用')).toBeInTheDocument();
+    expect(screen.queryByText(/部分步骤明细已到期/)).not.toBeInTheDocument();
+  });
+
+  it('shows the persisted authentication metadata when saving evidence failed', async () => {
+    const failed = { ...login, credentialArtifactId: undefined, credentialCaptureStatus: 'Failed',
+      credentialMaterialBytes: 356, credentialCaptureError: 'SQLITE_FULL' };
+    vi.mocked(api.getEvents).mockResolvedValue(ok({ items: [failed], total: 1, page: 1, pageSize: 20 }));
+    render(<EventsPage />);
+    expect(await screen.findByText('证据采集失败 · SQLITE_FULL · 356 字节')).toBeInTheDocument();
+    expect(screen.getByText('STATUS_LOGON_FAILURE')).toBeInTheDocument();
     expect(api.getCredentialEvidence).not.toHaveBeenCalled();
   });
 
@@ -191,4 +226,21 @@ describe('threat activity list', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
     await waitFor(() => expect(screen.queryByText(chinese['events.evidence.ntlm'])).not.toBeInTheDocument());
   });
+});
+
+it.each(['transport', 'envelope'])('distinguishes a %s failure from a successful empty page', async (failure) => {
+  const emptyPage = { items: [], total: 0, page: 1, pageSize: 20 };
+  if (failure === 'transport') vi.mocked(api.getEvents).mockRejectedValueOnce(new Error('offline'));
+  else vi.mocked(api.getEvents).mockResolvedValueOnce({ success: false, code: 'UNAVAILABLE', message: '', data: emptyPage });
+  const failed = render(<EventsPage />);
+  expect(await screen.findByText('事件接口暂不可用')).toBeInTheDocument();
+  expect(screen.queryByText('暂无登录尝试或连接活动')).not.toBeInTheDocument();
+  failed.unmount();
+
+  vi.mocked(api.getEvents).mockResolvedValueOnce({
+    success: true, code: 'OK', message: '', data: emptyPage,
+  });
+  render(<EventsPage />);
+  expect(await screen.findByText('暂无登录尝试或连接活动')).toBeInTheDocument();
+  expect(screen.queryByText('事件接口暂不可用')).not.toBeInTheDocument();
 });

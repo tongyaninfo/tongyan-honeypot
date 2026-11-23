@@ -1,5 +1,6 @@
 using Honeypot.Api.Models;
 using Honeypot.Api.Service;
+using Honeypot.Api.Service.impl;
 using Honeypot.Shared.Models;
 
 namespace Honeypot.Api.Common;
@@ -32,12 +33,14 @@ public static class OverviewConnectionMapEndpoints
     {
         var start = now.AddSeconds(-windowSeconds);
         // 一次 TCP 接纳代表一个连接，后续握手、认证、断开不重复计数。
-        var candidates = events.GetAll()
+        var connections = events is ReportInteractionEventStore persistent ? persistent.ReadMapConnections(start, now) : events.GetAll()
             .Where(item => item.OccurredAtUtc >= start && item.OccurredAtUtc <= now &&
                 !string.IsNullOrWhiteSpace(item.ConnectionId) && OverviewActivityProjection.IsConnectionAccepted(item))
             .OrderByDescending(item => item.OccurredAtUtc).ThenBy(item => item.EventId, StringComparer.Ordinal)
             .DistinctBy(item => item.ConnectionId, StringComparer.Ordinal)
-            .Select(item =>
+            .Select(item => new OverviewConnectionRow(item.EventId, item.ConnectionId, item.OccurredAtUtc, item.SourceIp,
+                item.SourcePort, item.AdapterKey, item.DestinationPort)).ToArray();
+        var candidates = connections.Select(item =>
             {
                 // 复用现有地址边界，并在入队前合并同一公网地址的不同写法。
                 var classified = IPLocationAddress.Classify(item.SourceIp ?? "", out var normalized);

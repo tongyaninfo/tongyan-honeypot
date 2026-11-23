@@ -10,7 +10,10 @@ using Honeypot.Api.Service;
 using Honeypot.Api.Service.impl;
 using Honeypot.Api.Workers;
 using Honeypot.Protocol.Abstractions.Models;
+using Honeypot.Protocols.Common;
+using Honeypot.Protocol.Abstractions.Service;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -22,18 +25,18 @@ using Xunit;
 
 namespace Honeypot.Runtime.Tests;
 
-public sealed class CredentialEvidencePersistenceTests
+public sealed partial class CredentialEvidencePersistenceTests
 {
     private const string Password = "Isolated-Credential-Persistence#123";
     private const string Username = "isolated-account";
     private static readonly AuthenticatedUser Admin = new("isolated-admin", "isolated-admin", ["Administrator"]);
 
     [Fact]
-    public async Task AnonymousEvidenceAuditOnlyRecordsValidRoutesWithinSharedQuota()
+    public async Task AnonymousEvidenceAuditRecordsEveryValidRoute()
     {
         var fixture = await Fixture.CreateAsync();
         var evidence = await fixture.SaveAsync("anonymous-audit");
-        using var access = fixture.OpenAccess();
+        var access = fixture.OpenAccess();
         using var services = new ServiceCollection().AddSingleton<ICredentialEvidenceAccessService>(access).BuildServiceProvider();
         const string path = "/api/v1/credential-evidence";
         var detail = $"{path}/{evidence.CredentialArtifactId}";
@@ -55,14 +58,14 @@ public sealed class CredentialEvidencePersistenceTests
         }
 
         var anonymous = access.GetAuditTrail();
-        Assert.Equal(4, anonymous.Count);
+        Assert.Equal(21, anonymous.Count);
         Assert.All(anonymous, row => Assert.Null(row.UserId));
         Assert.Contains(anonymous, row => row.Operation == "Export");
         Assert.Equal(401, access.Read(evidence.CredentialArtifactId, null).StatusCode);
         var viewer = new AuthenticatedUser("viewer", "viewer", ["Viewer"]);
         Assert.Equal(403, access.Read(evidence.CredentialArtifactId, viewer).StatusCode);
         Assert.Equal(200, access.ReadForExport(evidence.CredentialArtifactId, Admin).StatusCode);
-        Assert.Equal(6, access.GetAuditTrail().Count);
+        Assert.Equal(24, access.GetAuditTrail().Count);
 
         void AuditRejection(string method, string requestPath)
         {
@@ -241,24 +244,117 @@ public sealed class CredentialEvidencePersistenceTests
     }
 
     [Fact]
-    public async Task EvidenceIntakeStillEnforcesTheTotalByteLimit()
+    public async Task EvidenceCanCrossFormerTotalAndIndividualLimitsAndStillDecrypt()
     {
         var fixture = await Fixture.CreateAsync();
-        var capped = fixture.OpenStore(capacity: new() { MaxStoredMiB = 1 });
-        var content = JsonSerializer.Serialize(new { material = new string('x', 600 * 1024) });
-        var first = await Save(capped, "byte-limit-first");
-        var rejected = await Assert.ThrowsAsync<InvalidOperationException>(() => Save(capped, "byte-limit-second"));
-        Assert.Equal("CREDENTIAL_STORE_CAPACITY_EXCEEDED", rejected.Message);
-        Assert.Equal(first, Assert.Single(capped.GetAll()));
+        var store = fixture.OpenStore();
+        var content = new string('x', 4 * 1024 * 1024 + 1);
+        CredentialEvidenceSummary? saved = null;
+        for (var index = 0; index < 16; index++)
+            saved = await store.SaveAsync("conn", $"large-{index}", "192.0.2.10", "ssh", "Response", content, 1);
+        Assert.Equal(content, fixture.OpenStore().Get(saved!.CredentialArtifactId)!.Content);
+        Assert.Equal(16, store.GetAll().Count);
+    }
 
-        var reopened = fixture.OpenStore(capacity: new() { MaxStoredMiB = 2 });
-        var second = await Save(reopened, "byte-limit-second");
-        Assert.NotNull(reopened.Get(first.CredentialArtifactId));
-        Assert.Equal(content, reopened.Get(second.CredentialArtifactId)!.Content);
-        Assert.Equal(2, reopened.GetAll().Count);
+    [Fact]
+    public async Task MissingEvidenceKeyPreservesEveryAttemptWithSameConnectionAndSafeMetadata()
+    {
+        var fixture = await Fixture.CreateAsync();
+        var original = await fixture.SaveAsync("earlier");
+        var unavailable = fixture.OpenStore(fixture.Keys(Path.Combine(fixture.Directory, "unavailable-key-directory")));
+        var settings = Microsoft.Extensions.Options.Options.Create(new EventStorageOptions());
+        var writerStore = new ReportInteractionEventStore(fixture.Factory, unavailable,
+            new SqliteThreatProfileStore(fixture.Factory, settings, fixture.Clock, new ResourceIdGenerator()),
+            new ReportIngestionHealth(), NullLogger<ReportInteractionEventStore>.Instance, options: settings, time: fixture.Clock);
+        using var writer = new ReportEventWriterWorker(writerStore);
+        await writer.StartAsync(CancellationToken.None);
+        var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new { username = Username, password = Password }));
+        for (var i = 1; i <= 3; i++)
+        {
+            var attempt = Fixture.Event(original) with { EventId = $"key-missing-{i}", Sequence = i, AuthenticationAttempt = i,
+                CredentialArtifactId = null, Domain = "test-domain", AuthenticationFailureCode = "TEST_REJECTED" };
+            var fault = await Assert.ThrowsAsync<AuthenticationRecordingException>(() => FailedCaptureProbe.Attempt(writerStore, attempt, bytes));
+            Assert.Equal("CredentialCaptureFailed", fault.Code);
+            Assert.DoesNotContain(Password, fault.ToString());
+        }
+        await writer.StopAsync(CancellationToken.None);
+        var events = writerStore.GetByConnectionId(original.ConnectionId);
+        var attempts = events.Where(e => e.EventType == "AuthenticationAttempted").OrderBy(e => e.AuthenticationAttempt).ToArray();
+        Assert.Equal(new[] { "key-missing-1", "key-missing-2", "key-missing-3" }, attempts.Select(e => e.EventId));
+        Assert.All(attempts, e =>
+        {
+            Assert.Equal("Failed", e.CredentialCaptureStatus);
+            Assert.Equal("EVIDENCE_KEY_UNAVAILABLE", e.CredentialCaptureError);
+            Assert.Equal(bytes.Length, e.CredentialMaterialBytes);
+            Assert.Equal("TEST_REJECTED", e.AuthenticationFailureCode);
+            Assert.Equal(Username, e.Username);
+            Assert.Equal("test-domain", e.Domain);
+            Assert.Null(e.CredentialArtifactId);
+        });
+        Assert.Equal(3, events.Count(e => e.EventType == "CredentialCaptureFailed"));
+        Assert.Single(fixture.OpenStore().GetAll());
+        Assert.DoesNotContain(Password, JsonSerializer.Serialize(events));
+    }
 
-        Task<CredentialEvidenceSummary> Save(SqliteCredentialEvidenceStore store, string eventId) =>
-            store.SaveAsync("conn", eventId, "192.0.2.10", "ssh", "Response", content, 1);
+    private abstract class FailedCaptureProbe : ProtocolAdapterBase
+    {
+        public static Task<InteractionEvent> Attempt(IInteractionEventSink sink, InteractionEvent item, byte[] bytes) =>
+            RecordAccessAsync(sink, item, new ServiceProfile { ProfileId = "test", AdapterKey = "ssh" }, "Plaintext", bytes, CancellationToken.None).AsTask();
+    }
+
+    [Fact]
+    public async Task SqliteFullOnLargeEvidencePreservesOtherConnectionsInSameBatch()
+    {
+        var fixture = await Fixture.CreateAsync();
+        await using var connection = new SqliteConnection($"Data Source={fixture.DatabasePath};Pooling=False");
+        await connection.OpenAsync();
+        var factory = new Factory(new DbContextOptionsBuilder<HoneypotDbContext>().UseSqlite(connection).Options);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "PRAGMA page_count";
+        var pages = (long)(await command.ExecuteScalarAsync())!;
+        // 额外 12 页装得下邻接连接和认证元数据，SQLite 无法写入 1 MiB 密文。
+        command.CommandText = $"PRAGMA max_page_count={pages + 12}";
+        Assert.Equal(pages + 12, (long)(await command.ExecuteScalarAsync())!);
+        var health = new ReportIngestionHealth();
+        var options = Microsoft.Extensions.Options.Options.Create(new EventStorageOptions());
+        var evidence = new SqliteCredentialEvidenceStore(factory, fixture.Keys(), fixture.Clock, health);
+        var store = new ReportInteractionEventStore(factory, evidence,
+            new SqliteThreatProfileStore(factory, options, fixture.Clock, new ResourceIdGenerator()),
+            health, NullLogger<ReportInteractionEventStore>.Instance, options: options, time: fixture.Clock);
+        var accepted = new InteractionEvent
+        {
+            EventId = "small-accept", ConnectionId = "small-connection", Sequence = 1, EventType = "ConnectionAccepted",
+            OccurredAtUtc = fixture.Clock.GetUtcNow(), SourceIp = "192.0.2.10", DestinationIp = "192.0.2.20",
+            ListenerId = "listener", ServiceInstanceId = "instance", AdapterKey = "ssh", ProfileId = "profile",
+        };
+        var attempt = accepted with { EventId = "large-attempt", ConnectionId = "large-connection", Sequence = 2,
+            EventType = "AuthenticationAttempted", Outcome = "failure", Username = Username, MaterialType = "Plaintext" };
+        var material = JsonSerializer.SerializeToUtf8Bytes(new { username = Username, password = new string('x', 1 << 20) });
+        // 写入消费者尚未启动，因而接纳、大证据、关闭确定在同一批次内。
+        var smallAccepted = store.AppendAsync(accepted).AsTask();
+        var tooLarge = FailedCaptureProbe.Attempt(store, attempt, material);
+        var smallClosed = store.AppendAsync(accepted with { EventId = "small-close", Sequence = 2, EventType = "SessionClosed" }).AsTask();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        while (health.EventQueueDepth != 3) await Task.Delay(5, timeout.Token);
+        using var writer = new ReportEventWriterWorker(store);
+        await writer.StartAsync(CancellationToken.None);
+        try
+        {
+            await Assert.ThrowsAsync<AuthenticationRecordingException>(() => tooLarge.WaitAsync(timeout.Token));
+            Assert.True((await smallAccepted.WaitAsync(timeout.Token)).Recorded);
+            Assert.True((await smallClosed.WaitAsync(timeout.Token)).Recorded);
+            var saved = Assert.Single(store.GetByConnectionId("large-connection"), item => item.EventType == "AuthenticationAttempted");
+            Assert.Equal("Failed", saved.CredentialCaptureStatus);
+            Assert.Equal("SQLITE_FULL", saved.CredentialCaptureError);
+            Assert.Null(saved.CredentialArtifactId);
+            Assert.Empty(evidence.GetAll());
+            Assert.Equal(new[] { "small-accept", "small-close" }, store.GetByConnectionId("small-connection").OrderBy(e => e.Sequence).Select(e => e.EventId));
+            Assert.True((await store.AppendAsync(accepted)).IsDuplicate);
+            Assert.Equal(1, health.RejectedEvents);
+            Assert.Equal(1, health.Errors["SQLITE_FULL"]);
+            Assert.Equal(1, health.FaultsByStage["evidence.commit"].Occurrences);
+        }
+        finally { await writer.StopAsync(CancellationToken.None); }
     }
 
     [Fact]
@@ -309,10 +405,8 @@ public sealed class CredentialEvidencePersistenceTests
             return new(directory, path, factory);
         }
 
-        public SqliteCredentialEvidenceStore OpenStore(CredentialEvidenceKeys? keys = null, CredentialEvidenceOptions? capacity = null) =>
-            new(Factory, keys ?? Keys(), Clock, new ReportEventDiskBudget(Clock), new ReportIngestionHealth(),
-                Microsoft.Extensions.Options.Options.Create(new EventStorageOptions()),
-                Microsoft.Extensions.Options.Options.Create(capacity ?? new CredentialEvidenceOptions()));
+        public SqliteCredentialEvidenceStore OpenStore(CredentialEvidenceKeys? keys = null) =>
+            new(Factory, keys ?? Keys(), Clock, new ReportIngestionHealth());
 
         public CredentialEvidenceKeys Keys(string? keyDirectory = null) => new(
             new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["Honeypot:DataDirectory"] = Directory }).Build(),

@@ -152,9 +152,11 @@ const riskColumns: ColumnsType<ThreatIpProfile> = [
 export function AdapterActivityCard({
   activity,
   loading,
+  asOfUtc,
 }: {
   activity?: AdapterActivity[];
   loading: boolean;
+  asOfUtc?: string;
 }) {
   const [selected, setSelected] = useState<OverviewAdapterActivityFilter>();
   const wide = selected?.metric === 'authenticationFailures' || selected?.metric === 'protocolViolations';
@@ -171,7 +173,7 @@ export function AdapterActivityCard({
         size="small"
         loading={loading}
         dataSource={activity ?? []}
-        columns={adapterColumns(setSelected)}
+        columns={adapterColumns((filter) => setSelected(asOfUtc ? { ...filter, asOfUtc } : filter))}
         pagination={false}
         scroll={{ x: 448 }}
         locale={{

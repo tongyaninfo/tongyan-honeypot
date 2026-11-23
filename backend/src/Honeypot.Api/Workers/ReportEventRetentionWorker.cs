@@ -27,12 +27,15 @@ public sealed class ReportEventRetentionWorker(
             {
                 await RunOnceAsync(stoppingToken);
                 health.SetRetentionAvailable(true);
+                health.RecoverStage("retention.events");
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
             catch (Exception error)
             {
                 health.SetRetentionAvailable(false);
-                logger.LogWarning("Report event retention failed. ExceptionType={ExceptionType}", error.GetType().Name);
+                var code = ReportIngestionHealth.Classify(error);
+                health.RecordStageFault("retention.events", code);
+                logger.LogWarning("Report event retention failed. ErrorCode={ErrorCode}", code);
             }
         } while (await timer.WaitForNextTickAsync(stoppingToken));
     }
@@ -45,6 +48,7 @@ public sealed class ReportEventRetentionWorker(
         var auditsCutoff = now.AddDays(-options.Value.AuditRetentionDays).ToUnixTimeMilliseconds();
         for (var batch = 0; batch < 10; batch++)
         {
+            if (batch > 0 && health.EventQueueDepth > 0) break;
             if (!await PruneExpiredAsync(cutoff, detailsCutoff, now.ToUnixTimeMilliseconds(), auditsCutoff, cancellationToken)) break;
             await Task.Delay(TimeSpan.FromMilliseconds(50), cancellationToken);
         }
@@ -52,7 +56,7 @@ public sealed class ReportEventRetentionWorker(
         await using var db = await factory.CreateDbContextAsync(cancellationToken);
         await db.Database.OpenConnectionAsync(cancellationToken);
         await ReportEventDiskBudget.CheckpointAsync(db, cancellationToken);
-        await diskBudget.CanWriteAsync(db, options.Value, health, cancellationToken);
+        diskBudget.Observe(db, health);
     }
 
     private async Task<bool> PruneExpiredAsync(long cutoff, long detailsCutoff, long now, long auditsCutoff,
@@ -71,11 +75,15 @@ public sealed class ReportEventRetentionWorker(
             .OrderBy(source => source.FirstSeenAtUnixMs).Take(BatchSize).ExecuteDeleteAsync(cancellationToken);
         var details = await db.Set<InteractionEventEntity>().Where(item => item.ReceivedAtUnixMs <= detailsCutoff)
             .OrderBy(item => item.ReceivedAtUnixMs).Take(BatchSize).ExecuteDeleteAsync(cancellationToken);
+        var routine = await db.Set<InteractionEventEntity>().Where(item => item.ShortRetentionUntilUnixMs <= now)
+            .OrderBy(item => item.ShortRetentionUntilUnixMs).Take(BatchSize).ExecuteDeleteAsync(cancellationToken);
+        var summaries = await db.Set<ConnectionSummaryEntity>().Where(item => item.LastReceivedAtUnixMs <= detailsCutoff)
+            .OrderBy(item => item.LastReceivedAtUnixMs).Take(BatchSize).ExecuteDeleteAsync(cancellationToken);
         var threats = await db.Set<ThreatProfileEntity>().Where(item => item.ExpiresAtUnixMs <= now)
             .OrderBy(item => item.ExpiresAtUnixMs).Take(BatchSize).ExecuteDeleteAsync(cancellationToken);
         var audits = await db.Set<ManagementOperationAuditEntity>().Where(item => item.OccurredAtUnixMs < auditsCutoff)
             .OrderBy(item => item.OccurredAtUnixMs).Take(BatchSize).ExecuteDeleteAsync(cancellationToken);
         return eventCount == BatchSize || samples == BatchSize || sources == BatchSize || details == BatchSize ||
-            threats == BatchSize || audits == BatchSize;
+            threats == BatchSize || audits == BatchSize || routine == BatchSize || summaries == BatchSize;
     }
 }

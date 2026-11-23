@@ -85,7 +85,7 @@ public sealed class RuntimeTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task SharedConcurrencyRejectsBeforeWritingAnEvent(bool perSource)
+    public async Task SharedConcurrencyClosesAndRecordsRejectedConnection(bool perSource)
     {
         var registry = new ProtocolAdapterRegistry();
         registry.Register(new NoopAdapter("ssh"));
@@ -109,7 +109,15 @@ public sealed class RuntimeTests
         using var second = new TcpClient();
         await second.ConnectAsync(IPAddress.Loopback, secondPort);
         await WaitUntilAsync(() => host.GetStatuses().Any(item => item.Port == secondPort && item.RejectedCount == 1));
-        Assert.Equal(1, sink.WriteCount);
+        var rejected = await sink.Rejected.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var rejectedClose = await sink.RejectedClose.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal("rejected", rejected.Outcome);
+        Assert.Equal(perSource ? "source_concurrency" : "global_concurrency", rejected.PayloadSummary);
+        Assert.Equal(((IPEndPoint)second.Client.LocalEndPoint!).Port, rejected.SourcePort);
+        Assert.Equal(secondPort, rejected.DestinationPort);
+        Assert.Equal(rejected.ConnectionId, rejectedClose.ConnectionId);
+        Assert.Equal(2, rejectedClose.Sequence);
+        Assert.Equal(SessionCloseReason.AdmissionRejected, rejectedClose.CloseReason);
         var active = Assert.Single(host.GetActiveConnections());
         Assert.Equal(firstPort, active.DestinationPort);
         Assert.Equal("ssh", active.AdapterKey);
@@ -122,7 +130,7 @@ public sealed class RuntimeTests
         Assert.Equal((await sink.Closed.Task).ConnectionId, active.ConnectionId);
         using var subsequent = new TcpClient();
         await subsequent.ConnectAsync(IPAddress.Loopback, secondPort);
-        await WaitUntilAsync(() => sink.WriteCount == 4);
+        await WaitUntilAsync(() => sink.WriteCount == 6);
     }
 
     [Theory]
@@ -153,20 +161,27 @@ public sealed class RuntimeTests
         using var second = new TcpClient();
         await second.ConnectAsync(IPAddress.Loopback, secondPort);
         await WaitUntilAsync(() => host.GetStatuses().Any(item => item.Port == secondPort && item.RejectedCount == 1));
-        Assert.Equal(2, sink.Events.Count);
+        await WaitUntilAsync(() => sink.Events.Count == 4);
+        var rejected = Assert.Single(sink.Events, item => item.EventType == "ConnectionRejected");
+        Assert.Equal(perSource ? "source_rate" : "global_rate", rejected.PayloadSummary);
+        Assert.Equal(secondPort, rejected.DestinationPort);
 
         clock.AdvanceOneSecond();
         using var subsequent = new TcpClient();
         await subsequent.ConnectAsync(IPAddress.Loopback, secondPort);
-        await WaitUntilAsync(() => sink.Events.Count == 4);
+        await WaitUntilAsync(() => sink.Events.Count == 6);
+        Assert.Equal(3, sink.Events.Select(e => e.ConnectionId).Distinct().Count());
+        Assert.Equal(6, sink.Events.Select(e => e.EventId).Distinct().Count());
     }
 
-    [Fact]
-    public async Task ConnectionEventDeadlineClosesSessionAsStorageDegraded()
+    [Theory]
+    [InlineData(false, 1)]
+    [InlineData(true, 2)]
+    public async Task ConnectionEventDeadlineClosesSessionAsStorageDegraded(bool closeFails, int expectedFailures)
     {
         var registry = new ProtocolAdapterRegistry();
         registry.Register(new NoopAdapter("ssh"));
-        var sink = new PausedAcceptedSink();
+        var sink = new PausedAcceptedSink(closeFails);
         await using var host = new TcpListenerHost(registry, sink, new ConnectionIdGenerator(),
             NullLogger<TcpListenerHost>.Instance, OptionsFactory.Create(new ConnectionAdmissionOptions { AcceptedEventTimeoutSeconds = 1 }));
         var port = GetFreePort();
@@ -178,8 +193,8 @@ public sealed class RuntimeTests
 
         Assert.Equal(SessionCloseReason.StorageDegraded, closed.CloseReason);
         Assert.Equal("storage_failed", closed.Outcome);
-        Assert.Equal(1, Assert.Single(host.GetStatuses()).EventWriteFailureCount);
         await WaitUntilAsync(() => Assert.Single(host.GetStatuses()).ActiveConnections == 0);
+        Assert.Equal(expectedFailures, Assert.Single(host.GetStatuses()).EventWriteFailureCount);
         Assert.Empty(host.GetActiveConnections());
     }
 
@@ -716,13 +731,15 @@ public sealed class RuntimeTests
         public void AdvanceOneSecond() => Interlocked.Add(ref _timestamp, TimestampFrequency);
     }
 
-    private sealed class PausedAcceptedSink : IInteractionEventSink
+    private sealed class PausedAcceptedSink(bool closeFails = false) : IInteractionEventSink
     {
         private int _writeCount;
         public int WriteCount => Volatile.Read(ref _writeCount);
         public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource<InteractionEvent> Closed { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<InteractionEvent> Rejected { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<InteractionEvent> RejectedClose { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public async ValueTask<EventAppendResult> AppendAsync(InteractionEvent item, CancellationToken cancellationToken = default)
         {
@@ -732,7 +749,13 @@ public sealed class RuntimeTests
                 Entered.TrySetResult();
                 await Release.Task.WaitAsync(cancellationToken);
             }
-            if (item.EventType == "SessionClosed") Closed.TrySetResult(item);
+            if (item.EventType == "ConnectionRejected") Rejected.TrySetResult(item);
+            if (item.EventType == "SessionClosed")
+            {
+                if (item.CloseReason == SessionCloseReason.AdmissionRejected) RejectedClose.TrySetResult(item);
+                else Closed.TrySetResult(item);
+                if (closeFails) return EventAppendResult.DegradedResult("SQLITE_FULL", "Synthetic full disk");
+            }
             return EventAppendResult.Accepted();
         }
     }

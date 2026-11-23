@@ -1,4 +1,5 @@
 using Honeypot.Api.Service;
+using Honeypot.Api.Service.impl;
 using Honeypot.Api.Models;
 using Honeypot.Protocol.Abstractions.Models;
 using Honeypot.Shared.Models;
@@ -22,6 +23,14 @@ public static class InteractionEventEndpoints
 
             var query = new InteractionEventQuery(sourceIp, adapterKey, eventType, destinationPort, ids, Page: page, PageSize: pageSize);
             return Results.Ok(ApiResult<object>.Ok(view == "activity" ? store.ReadActivities(query) : store.ReadEvents(query)));
+        });
+
+        endpoints.MapGet("/api/v1/connections/{connectionId}/summary", (string connectionId, IInteractionEventStore store) =>
+        {
+            var summary = (store as ReportInteractionEventStore)?.ReadConnectionSummary(connectionId);
+            return summary is null
+                ? Results.NotFound(ApiResult<object>.Fail("CONNECTION_NOT_FOUND", "连接摘要不存在或已过期。"))
+                : Results.Ok(ApiResult<ConnectionTraceSummary>.Ok(summary));
         });
 
         endpoints.MapGet("/api/v1/connections/{connectionId}/events", (string connectionId, IInteractionEventStore store) =>

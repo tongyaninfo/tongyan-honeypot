@@ -9,6 +9,7 @@ public sealed class ReportEventEntity
     public string EventId { get; set; } = "";
     public long OccurredAtUnixMs { get; set; }
     public string EventType { get; set; } = "";
+    public string Outcome { get; set; } = "";
     public string SourceIp { get; set; } = "";
     public string AdapterKey { get; set; } = "";
     public int DestinationPort { get; set; }

@@ -4,6 +4,7 @@ using Honeypot.Api.Data.Models;
 using Honeypot.Api.Models;
 using Honeypot.Protocol.Abstractions.Models;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Data.Sqlite;
 
 namespace Honeypot.Api.Service.impl;
 
@@ -14,7 +15,7 @@ public sealed partial class ReportInteractionEventStore
         using var db = OpenReadContext();
         var now = _time.GetUtcNow();
         var recent = now.AddHours(-_options.MemoryRetentionHours).ToUnixTimeMilliseconds();
-        // 总览与地图只取有上限的近期快照。数据库历史通过独立分页接口查询。
+        // 保留兼容调用所需的有界快照。首页、地图和历史列表分别使用专门的查询。
         return OrderForList(Active(db, now).Where(item => item.ReceivedAtUnixMs > recent)
             .OrderByDescending(item => item.ReceivedAtUnixMs).ThenByDescending(item => item.OccurredAtUtcTicks)
             .ThenByDescending(item => item.Sequence).Take(_options.MemoryEventCapacity))
@@ -43,32 +44,59 @@ public sealed partial class ReportInteractionEventStore
     public QueryPageResult<RealtimeInteractionEvent> ReadActivities(InteractionEventQuery query)
     {
         using var db = OpenReadContext();
-        var connectionSteps = FilterConnection(Active(db, _time.GetUtcNow()), query);
-        // 每次认证都显示；没有认证时按共用优先级取一个代表步骤，再应用事件类型和时间筛选。
-        var representatives = connectionSteps.Where(item => item.ActivityPriority == InteractionActivityProjection.Authentication ||
-            item.EventId == connectionSteps.Where(step => step.ConnectionId == item.ConnectionId)
-                .OrderByDescending(step => step.ActivityPriority)
-                .ThenBy(step => step.ActivityPriority == InteractionActivityProjection.Accepted ? step.Sequence : 0L)
-                .ThenByDescending(step => step.Sequence)
-                .ThenBy(step => step.ActivityPriority == InteractionActivityProjection.Accepted ? step.OccurredAtUtcTicks : 0L)
-                .ThenByDescending(step => step.OccurredAtUtcTicks)
-                .ThenBy(step => step.EventId).Select(step => step.EventId).First());
-        var filtered = FilterEvent(representatives, query);
+        var now = _time.GetUtcNow();
+        var active = Active(db, now);
         var (page, size, offset) = QueryPage.Bounds(query.Page, query.PageSize);
-        // 没有步骤筛选时，每个连接贡献全部认证活动，或在无认证时贡献一个代表步骤。
-        // 按原 ConnectionId 列的 NOCASE 规则分组，避免为了计数逐行查找代表步骤。
-        var total = string.IsNullOrWhiteSpace(query.EventType) && query.FromUtc is null && query.ToUtc is null
-            ? connectionSteps.GroupBy(step => step.ConnectionId)
-                .Select(connection => connection.Count(step => step.ActivityPriority == InteractionActivityProjection.Authentication))
-                .Sum(activities => activities == 0 ? 1 : activities)
-            : filtered.Count();
-        var items = offset < total ? OrderForList(filtered).Skip((int)offset).Take(size).Select(item => new
-            {
-                item.EventJson,
-                EventCount = connectionSteps.Count(step => step.ConnectionId == item.ConnectionId),
-            }).AsEnumerable().Select(item => RealtimeInteractionEvent.From(InteractionEventEntity.Read(item.EventJson))
-                with { EventCount = item.EventCount }).ToArray() : [];
-        return new(items, total, page, size);
+        db.Database.OpenConnection();
+        using var read = ((SqliteConnection)db.Database.GetDbConnection()).BeginTransaction(deferred: true);
+        using var contextTransaction = db.Database.UseTransaction(read);
+        if (query.ConnectionIds is null && string.IsNullOrWhiteSpace(query.SourceIp) && string.IsNullOrWhiteSpace(query.AdapterKey) &&
+            string.IsNullOrWhiteSpace(query.EventType) && query.DestinationPort is null && query.FromUtc is null && query.ToUtc is null)
+        {
+            return ReadRecentActivityPage(db, now.AddDays(-_options.DetailRetentionDays).ToUnixTimeMilliseconds(),
+                now.ToUnixTimeMilliseconds(), page, size, offset);
+        }
+        var steps = FilterConnection(active, query);
+        var summaries = db.Set<ConnectionSummaryEntity>().AsNoTracking();
+
+        // 显式 connectionIds 过滤按原始 ID 大小写执行，保留历史导出和精确筛选口径。
+        if (query.ConnectionIds is not null)
+        {
+            var reps = steps.Where(item => item.ActivityPriority == InteractionActivityProjection.Authentication ||
+                item.EventId == steps.Where(step => step.ConnectionId == item.ConnectionId)
+                    .OrderByDescending(step => step.ActivityPriority)
+                    .ThenBy(step => step.ActivityPriority == InteractionActivityProjection.Accepted ? step.Sequence : 0L)
+                    .ThenByDescending(step => step.Sequence)
+                    .ThenBy(step => step.ActivityPriority == InteractionActivityProjection.Accepted ? step.OccurredAtUtcTicks : 0L)
+                    .ThenByDescending(step => step.OccurredAtUtcTicks).ThenBy(step => step.EventId).Select(step => step.EventId).First());
+            var filtered = FilterEvent(reps, query);
+            var total = filtered.Count();
+            var keys = offset < total ? OrderForList(filtered).Skip((int)offset).Take(size).Select(item =>
+                new ActivityPageKey(item.EventId, steps.Count(x => x.ConnectionId == item.ConnectionId),
+                    summaries.Any(x => x.ConnectionId == item.ConnectionId && x.ClosedAtUtcTicks != null),
+                    item.OccurredAtUtcTicks, item.Sequence)).ToArray() : [];
+            return new(ReadActivityRows(db, keys), total, page, size);
+        }
+
+        // 普通列表使用持久代表步骤或逐次认证，不再针对每条候选明细重算同一连接的优先级。
+        var visible = steps.Where(item => item.ActivityPriority == InteractionActivityProjection.Authentication ||
+            summaries.Any(row => row.ConnectionId == item.ConnectionId && row.AuthenticationActivityCount == 0 &&
+                row.RepresentativeId == item.EventId));
+        var results = FilterEvent(visible, query);
+
+        // 两类活动互斥。认证走已有事件类型索引，其余连接按代表事件主键查找，仅扫描连接行。
+        var qualifying = FilterEvent(steps, query);
+        var count = qualifying.Count(item => item.EventType == "AuthenticationAttempted" || item.EventType == "AuthorizationDenied") +
+            summaries.Where(summary => summary.AuthenticationActivityCount == 0)
+                .Join(qualifying, summary => summary.RepresentativeId, item => item.EventId, (summary, item) => item.EventId).Count();
+        if (offset >= count) return new([], count, page, size);
+        var rows = from item in results join summary in summaries on item.ConnectionId equals summary.ConnectionId
+                   select new { Item = item, Summary = summary };
+        var selected = rows.OrderByDescending(row => row.Item.OccurredAtUtcTicks)
+            .ThenByDescending(row => row.Item.Sequence).ThenBy(row => row.Item.EventId)
+            .Skip((int)offset).Take(size).Select(row => new ActivityPageKey(row.Item.EventId, row.Summary.ObservedCount,
+                row.Summary.ClosedAtUtcTicks != null, row.Item.OccurredAtUtcTicks, row.Item.Sequence)).ToArray();
+        return new(ReadActivityRows(db, selected), count, page, size);
     }
 
     private HoneypotDbContext OpenReadContext()
@@ -81,7 +109,9 @@ public sealed partial class ReportInteractionEventStore
     private IQueryable<InteractionEventEntity> Active(HoneypotDbContext db, DateTimeOffset now)
     {
         var cutoff = now.AddDays(-_options.DetailRetentionDays).ToUnixTimeMilliseconds();
-        return db.Set<InteractionEventEntity>().AsNoTracking().Where(item => item.ReceivedAtUnixMs > cutoff);
+        var end = now.ToUnixTimeMilliseconds();
+        return db.Set<InteractionEventEntity>().AsNoTracking().Where(item => item.ReceivedAtUnixMs > cutoff &&
+            (item.ShortRetentionUntilUnixMs == null || item.ShortRetentionUntilUnixMs > end));
     }
 
     private static IQueryable<InteractionEventEntity> FilterConnection(IQueryable<InteractionEventEntity> source, InteractionEventQuery query)

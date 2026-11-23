@@ -44,7 +44,7 @@ public static class InteractionActivityProjection
         "storagedegraded" or "credentialcapturefailed" or "authenticationeventwritefailed" => 3,
         "protocolviolation" or "handshaketimeout" or "authenticationrequired" or "capturetruncated" or
             "resourcelimitexceeded" or "rulematched" => 2,
-        "connectionaccepted" => Accepted,
+        "connectionaccepted" or "connectionrejected" => Accepted,
         _ => 0,
     };
 }

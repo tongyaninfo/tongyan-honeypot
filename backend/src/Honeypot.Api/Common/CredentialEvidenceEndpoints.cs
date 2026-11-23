@@ -45,12 +45,14 @@ public static class CredentialEvidenceEndpoints
             return Results.Ok(ApiResult<QueryPageResult<CredentialEvidenceSummary>>.Ok(store.GetPage(page, pageSize)));
         });
 
-        endpoints.MapGet("/api/v1/credential-evidence/audit", (HttpContext context, ICredentialEvidenceAccessService access) =>
+        endpoints.MapGet("/api/v1/credential-evidence/audit", (HttpContext context, ICredentialEvidenceAccessService access, int? page, int? pageSize) =>
         {
             var user = context.Items["CurrentUser"] as AuthenticatedUser;
             if (!UserAuthorization.IsAdministrator(user))
                 return Results.Json(ApiResult<object>.Fail(user is null ? "UNAUTHORIZED" : "FORBIDDEN", "仅管理员可查询证据访问审计。"), statusCode: user is null ? 401 : 403);
             context.Response.Headers.CacheControl = "no-store";
+            // 旧调用继续读取最近窗口，分页接口可检索整个留存期。
+            if (page is not null || pageSize is not null) return Results.Ok(ApiResult<QueryPageResult<CredentialEvidenceAudit>>.Ok(access.GetAuditPage(page, pageSize)));
             return Results.Ok(ApiResult<IReadOnlyCollection<CredentialEvidenceAudit>>.Ok(access.GetAuditTrail()));
         });
 

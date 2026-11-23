@@ -63,7 +63,9 @@ public sealed class SmbAuthenticationTests
         }
         finally { client.Disconnect(); }
         Assert.Empty(server.Sink.Evidence);
-        Assert.DoesNotContain(server.Sink.Events, item => item.EventType == "AuthenticationAttempted");
+        var attempted = Assert.Single(server.Sink.Events, e => e.EventType == "AuthenticationAttempted");
+        Assert.Equal("Failed", attempted.CredentialCaptureStatus);
+        Assert.Null(attempted.CredentialArtifactId);
         Assert.Contains(server.Sink.Events, item => item.EventType == "CredentialCaptureFailed");
     }
 

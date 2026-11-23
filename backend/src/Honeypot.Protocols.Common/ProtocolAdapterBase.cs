@@ -36,7 +36,7 @@ public abstract class ProtocolAdapterBase : IHoneypotServiceAdapter
         // password 参数仅为旧调用点过渡兼容保留，普通事件绝不保存原文。
     };
 
-    /// <summary>先写加密证据，再追加同一 ID 的失败事件；无法可靠记录时立即终止当前协议流程。</summary>
+    /// <summary>用同一 ID 提交加密证据和认证结果；无法可靠记录时立即终止当前协议流程。</summary>
     protected static async ValueTask<InteractionEvent> RecordAuthenticationAsync(
         IInteractionEventSink sink, ProtocolSessionContext context, ServiceProfile profile, string? username,
         string method, string failureCode, int attempt, string materialType, ReadOnlyMemory<byte> material,
@@ -53,43 +53,64 @@ public abstract class ProtocolAdapterBase : IHoneypotServiceAdapter
             MaterialType = materialType,
             CredentialCaptureStatus = "Disabled",
         };
+        return await RecordAccessAsync(sink, authentication, profile, materialType, material, ct);
+    }
+
+    protected static async ValueTask<InteractionEvent> RecordAccessAsync(IInteractionEventSink sink, InteractionEvent item,
+        ServiceProfile profile, string materialType, ReadOnlyMemory<byte> material, CancellationToken ct)
+    {
+        item = item with { CredentialMaterialBytes = material.Length };
         var stage = "CredentialCaptureFailed";
+        string? storageCode = null;
         try
         {
             if (profile.StoreCredentialEvidence && profile.RecordPassword)
             {
-                var artifact = await StoreAsync(sink, context, authentication.EventId, materialType, material, profile, ct);
-                authentication = authentication with { CredentialArtifactId = artifact, CredentialCaptureStatus = "Captured" };
+                var evidence = new CredentialEvidence(item.ConnectionId, item.EventId, item.SourceIp, item.AdapterKey,
+                    materialType, material, item.OccurredAtUtc, profile.CredentialEvidenceRetentionDays, "utf8-json");
+                var saved = await CredentialEventRecording.AppendAsync(sink, item, evidence, ct);
+                if (!saved.Result.Recorded)
+                {
+                    stage = "AuthenticationEventWriteFailed";
+                    storageCode = saved.Result.Code;
+                    throw new AuthenticationRecordingException(stage);
+                }
+                return saved.Event;
             }
             stage = "AuthenticationEventWriteFailed";
-            var result = await sink.AppendAsync(authentication, ct);
-            if (!result.Recorded) throw new AuthenticationRecordingException(stage);
-            return authentication;
+            if (!(await sink.AppendAsync(item, ct)).Recorded) throw new AuthenticationRecordingException(stage);
+            return item;
         }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-        catch (Exception)
+        catch (Exception error)
         {
-            // 仅尝试追加固定诊断，不传播原始存储异常、材料或异常堆栈。
+            if (error is AuthenticationRecordingException failure) stage = failure.Code;
+            using var diagnosticDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+            var diagnosticCt = diagnosticDeadline.Token;
+            var reason = storageCode switch
+            {
+                "SQLITE_FULL" or "SQLITE_BUSY" or "SQLITE_LOCKED" or "SQLITE_READONLY" or "SQLITE_IOERR" or "SQLITE_CANTOPEN" => storageCode,
+                _ when error is System.Security.Cryptography.CryptographicException => "EVIDENCE_KEY_UNAVAILABLE",
+                _ when error is OperationCanceledException => "EVIDENCE_CONFIRMATION_TIMEOUT",
+                _ => "EVIDENCE_CAPTURE_FAILED",
+            };
             try
             {
-                await sink.AppendAsync(Event(context, stage, "authentication", "storage_failed",
-                    "Authentication evidence could not be recorded"), ct);
+                // 大材料失败时剩余空间可能仍够提交元数据。相同 EventId 令确认超时后的重试保持幂等。
+                var fallback = await sink.AppendAsync(item with
+                {
+                    CredentialArtifactId = null, CredentialCaptureStatus = profile.StoreCredentialEvidence && profile.RecordPassword ? "Failed" : "Disabled",
+                    CredentialCaptureError = reason,
+                }, diagnosticCt).AsTask().WaitAsync(diagnosticCt);
+                if (!fallback.IsDuplicate)
+                    await sink.AppendAsync(item with { EventId = Guid.NewGuid().ToString("N"), EventType = stage,
+                        CredentialArtifactId = null, CredentialCaptureStatus = "Failed", CredentialCaptureError = reason,
+                        Outcome = "storage_failed", RiskDelta = 0, PayloadSummary = "Authentication evidence could not be recorded" },
+                        diagnosticCt).AsTask().WaitAsync(diagnosticCt);
             }
-            catch (Exception) { /* 存储已降级，不能再依赖它写出原始异常。 */ }
+            catch (Exception) { /* 诊断失败时禁止输出原始材料及异常正文。 */ }
+            if (error is OperationCanceledException && ct.IsCancellationRequested) throw;
             throw new AuthenticationRecordingException(stage);
         }
-    }
-
-    protected static async ValueTask<string> StoreAsync(IInteractionEventSink sink, ProtocolSessionContext c,
-        string eventId, string type, ReadOnlyMemory<byte> material, ServiceProfile p, CancellationToken ct)
-    {
-        if (sink is not ICredentialEvidenceSink evidenceSink || !p.StoreCredentialEvidence)
-            throw new AuthenticationRecordingException("CREDENTIAL_STORE_UNAVAILABLE");
-        var artifact = await evidenceSink.StoreAsync(new CredentialEvidence(c.ConnectionId, eventId,
-            Address(c.RemoteEndPoint), c.AdapterKey, type, material, DateTimeOffset.UtcNow, p.CredentialEvidenceRetentionDays, "utf8-json"), ct);
-        if (string.IsNullOrWhiteSpace(artifact) || artifact.StartsWith("pending-", StringComparison.OrdinalIgnoreCase))
-            throw new AuthenticationRecordingException("CREDENTIAL_STORE_UNAVAILABLE");
-        return artifact;
     }
 
     protected static async ValueTask<int> ReadAsync(IHoneypotSession s, Memory<byte> b, TimeSpan timeout, CancellationToken ct)

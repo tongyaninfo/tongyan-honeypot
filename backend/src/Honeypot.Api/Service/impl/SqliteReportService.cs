@@ -219,14 +219,36 @@ public sealed class SqliteReportService(
     private static async Task<IReadOnlyList<ReportTrendPoint>> TrendAsync(HoneypotDbContext db, IQueryable<ReportEventEntity> facts,
         long start, long end, long retentionCutoff, long width, CancellationToken ct)
     {
-        var retainedStart = Math.Max(start, retentionCutoff);
         var values = await facts.GroupBy(item => (item.OccurredAtUnixMs - start) / width).Select(group => new
         {
             Index = group.Key, Events = group.LongCount(), Connections = group.LongCount(item => item.EventType == "connectionaccepted"),
             Failures = group.LongCount(item => item.IsAuthenticationFailure), Violations = group.LongCount(item => item.EventType == "protocolviolation"),
         }).ToDictionaryAsync(item => item.Index, ct);
+        var coverages = await TrendCoverage(db, start, end, retentionCutoff, width).ToDictionaryAsync(item => item.Bucket, ct);
+        var result = new List<ReportTrendPoint>();
+        for (long index = 0; start + index * width < end; index++)
+        {
+            values.TryGetValue(index, out var value);
+            coverages.TryGetValue(index, out var coverage);
+            var covered = coverage?.CoveredMs ?? 0;
+            var duration = Math.Min(width, end - (start + index * width));
+            var status = CoverageStatus(covered, duration);
+            var observed = covered > 0 || value is not null;
+            result.Add(new(DateTimeOffset.FromUnixTimeMilliseconds(start + index * width), observed ? value?.Events ?? 0 : null,
+                observed ? value?.Connections ?? 0 : null, observed ? value?.Failures ?? 0 : null,
+                observed ? value?.Violations ?? 0 : null, status));
+        }
+        return result;
+    }
+
+    internal static string CoverageStatus(long covered, long duration) =>
+        covered == 0 ? "unknown" : covered >= duration ? "complete" : "partial";
+
+    internal static IQueryable<TrendCoverageBucket> TrendCoverage(HoneypotDbContext db, long start, long end, long retentionCutoff, long width)
+    {
+        var retainedStart = Math.Max(start, retentionCutoff);
         // 按趋势桶拆分后分别取区间并集；正常心跳最多拆两段，补充样本跨更多桶也能正确处理。
-        var coverages = await db.Database.SqlQuery<TrendCoverageBucket>($"""
+        return db.Database.SqlQuery<TrendCoverageBucket>($"""
             WITH RECURSIVE spans AS (
                 SELECT MAX("CoverageStartAtUnixMs", {retainedStart}) AS s, MIN("CapturedAtUnixMs", {end}) AS e
                 FROM report_runtime_samples
@@ -245,24 +267,10 @@ public sealed class SqliteReportService(
                 FROM parts
             )
             SELECT Bucket, SUM(MAX(0, e - MAX(s, COALESCE(previousEnd, s)))) AS CoveredMs FROM ordered GROUP BY Bucket
-            """).ToDictionaryAsync(item => item.Bucket, ct);
-        var result = new List<ReportTrendPoint>();
-        for (long index = 0; start + index * width < end; index++)
-        {
-            values.TryGetValue(index, out var value);
-            coverages.TryGetValue(index, out var coverage);
-            var covered = coverage?.CoveredMs ?? 0;
-            var duration = Math.Min(width, end - (start + index * width));
-            var status = covered == 0 ? "unknown" : covered >= duration ? "complete" : "partial";
-            var observed = covered > 0 || value is not null;
-            result.Add(new(DateTimeOffset.FromUnixTimeMilliseconds(start + index * width), observed ? value?.Events ?? 0 : null,
-                observed ? value?.Connections ?? 0 : null, observed ? value?.Failures ?? 0 : null,
-                observed ? value?.Violations ?? 0 : null, status));
-        }
-        return result;
+            """);
     }
 
-    private sealed class TrendCoverageBucket
+    internal sealed class TrendCoverageBucket
     {
         public long Bucket { get; set; }
         public long CoveredMs { get; set; }

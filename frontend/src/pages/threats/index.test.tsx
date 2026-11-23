@@ -82,3 +82,21 @@ it('localizes status tags and exports all loaded rows with the same status label
   expect(screen.getByText('Unknown status')).toBeInTheDocument();
   expect(screen.queryByText('已封禁')).not.toBeInTheDocument();
 });
+
+it.each(['transport', 'envelope'])('distinguishes a %s failure from a successful empty page', async (failure) => {
+  session.locale = 'zh-CN';
+  const emptyPage = { items: [], total: 0, page: 1, pageSize: 20 };
+  if (failure === 'transport') vi.mocked(api.getThreats).mockRejectedValueOnce(new Error('offline'));
+  else vi.mocked(api.getThreats).mockResolvedValueOnce({ success: false, code: 'UNAVAILABLE', message: '', data: emptyPage });
+  const failed = render(<ThreatsPage />);
+  expect(await screen.findByText('威胁清单 API 暂不可用')).toBeInTheDocument();
+  expect(screen.queryByText('暂无威胁 IP')).not.toBeInTheDocument();
+  failed.unmount();
+
+  vi.mocked(api.getThreats).mockResolvedValueOnce({
+    success: true, code: 'OK', message: '', data: emptyPage,
+  });
+  render(<ThreatsPage />);
+  expect(await screen.findByText('暂无威胁 IP')).toBeInTheDocument();
+  expect(screen.queryByText('威胁清单 API 暂不可用')).not.toBeInTheDocument();
+});

@@ -85,7 +85,7 @@ podman build --platform linux/amd64 --pull=never -f /tmp/hp-image/Dockerfile \
   -t <harbor>/honeypot/api:0.1.0-<构建时间戳> /tmp/hp-image
 ```
 
-镜像以非 root 用户 `app`（UID 1654）运行，数据目录为 `/app/data`（`Honeypot:DataDirectory`）。**容器部署同样必须使用 `https://` 监听并提供证书**（见 `Kestrel__Certificates__Default__*`）。容器内无 curl/wget，健康检查使用应用内置探针 `Honeypot.Api --probe-management-health` 或 bash `/dev/tcp`。
+镜像以非 root 用户 `app`（UID 1654）运行，数据目录为 `/app/data`（`Honeypot:DataDirectory`）。**容器部署同样必须使用 `https://` 监听并提供证书**（见 `Kestrel__Certificates__Default__*`）；历史上以 `--urls http://...` 运行属启动校验未读取到命令行参数的巧合，不应再使用。容器内无 curl/wget，健康检查可用应用内置探针 `Honeypot.Api --probe-management-health` 或 bash `/dev/tcp`。
 
 ## 推送镜像仓库
 
@@ -133,16 +133,18 @@ docker compose -p honeypot -f compose.yaml ps
 | 配置节 | 默认值和行为 |
 | --- | --- |
 | `Honeypot:LoginLockout` | `MaxFailedAttempts=5`、`DurationMinutes=30`。连续失败达到阈值后暂停系统的新登录。成功登录清零，锁定期间的请求不延长锁定，已有会话继续使用。截止时间保存到数据目录的 `login-lockout.json`。 |
-| `Honeypot:ConnectionAdmission` | `MaxConcurrentConnections=512`、`MaxConcurrentConnectionsPerSource=24`、`MaxNewConnectionsPerSecond=120`、`MaxNewConnectionsPerSourcePerSecond=12`。所有蜜罐 TCP 端口共享这些额度，各监听自身的并发限制也继续生效。超限连接关闭并累计拒绝数。 |
-| `Honeypot:Events` | `QueueCapacity=256`。`DetailRetentionDays=30`、`ThreatRetentionDays=30`、`ReportRetentionDays=90` 和 `AuditRetentionDays=90` 分别控制事件详情、威胁档案、报告事实与采样及管理操作审计。总览近期快照沿用 `MemoryEventCapacity=20000` 和 `MemoryRetentionHours=24`。 |
-| `Honeypot:Events` 磁盘限制 | `DatabaseBudgetMiB=1024`、`MinimumFreeDiskMiB=256`。事件、认证证据和报告采样写入检查数据库及 SQLite 附属文件和磁盘剩余空间，触发阈值时按采集失败处理。整个数据目录的硬配额由文件系统设置。 |
-| `Honeypot:CredentialEvidence` | `MaxStoredMiB=64` 控制有效期内认证证据的总内容大小，可按采集量和数据库磁盘预算调整。每份证据至多 4 MiB，份数不限。`AuditRetentionDays=90` 用于认证证据访问审计。证据有效期取实例的 `CredentialEvidenceRetentionDays`，默认 30 天。`KeyDirectory` 可指定由服务账号独占的密钥目录，默认为数据目录下的 `credential-evidence-keys`。 |
+| `Honeypot:ConnectionAdmission` | `MaxConcurrentConnections=512`、`MaxConcurrentConnectionsPerSource=24`、`MaxNewConnectionsPerSecond=120`、`MaxNewConnectionsPerSourcePerSecond=12`。所有蜜罐 TCP 端口共享这些额度，各监听自身的并发限制也继续生效。准入拒绝的连接也按连接 ID 记录原因。 |
+| `Honeypot:Events` | `QueueCapacity=256` 控制内存排队。连接、认证及异常明细按 `DetailRetentionDays=30` 留存；新采集的正常握手按 `HandshakeRetentionHours=48` 留存。威胁档案、报告及审计分别由 `ThreatRetentionDays=30`、`ReportRetentionDays=90`、`AuditRetentionDays=90` 控制。 |
+| SQLite 存储 | 库、WAL 和卷余量用于观测。历史 `DatabaseBudgetMiB`、`MinimumFreeDiskMiB`、`MaxStoredMiB` 已失效；SQLite 实际返回的空间、锁和 I/O 错误可由存储指标定位。 |
+| `Honeypot:CredentialEvidence` | 已按协议输入边界采集的材料加密保留。每个实例的 `CredentialEvidenceRetentionDays` 默认 30 天。证据访问审计由 `AuditRetentionDays=90` 控制；密钥默认位于数据目录下的 `credential-evidence-keys`，也可由 `KeyDirectory` 指定。 |
 
-服务实例的对外主机名、产品和版本字段只填写仿真值。协议使用单独生成的仿真证书，管理端证书仅用于管理端 HTTPS。管理 API 的 `/api/v1/metrics/summary` 可查询事件队列、拒绝写入量、最近成功写入和磁盘保护状态。
+服务实例的对外主机名、产品和版本字段只填写仿真值。协议使用单独生成的仿真证书，管理端证书仅用于管理端 HTTPS。管理 API 的 `/api/v1/metrics/summary` 可查询采集队列、拒写原因、锁重试及最近成功写入时间。
 
 留存任务分批清理超期记录，SQLite 空闲页由后续写入复用。升级前暂停采集并备份数据目录，使用 SQLite 一致性备份。首次采集证据时创建专用密钥文件 `evidence-v1.key`。密钥目录单独挂载时，也须受控备份。重启、换容器或恢复备份时使用与数据库匹配的密钥。已有证据但找不到匹配密钥时，凭据读写会失败。
 
 业务持久化迁移增加五张表和索引。旧报表记录保留在原表。需要回退应用版本时保留新表及密钥，避免使用反向迁移删除已经收集的记录。[持久化实施方案](../docs/spec/连接事件与威胁清单设计.md#11-详细事件威胁档案与密码簿持久化)
+
+增量迁移 `20261119111011_ConnectionSummaries` 从真实连接明细回填摘要，新版正常握手使用短留。其他实例的切换和回退步骤见[SQLite 采集与查询整改](../docs/spec/SQLite采集与查询整改.md)。
 
 ### 实时飞线地图落点
 

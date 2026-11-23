@@ -1,4 +1,5 @@
 using System.Globalization;
+using Honeypot.Api.Common;
 using Honeypot.Api.Data;
 using Honeypot.Api.Data.Models;
 using Honeypot.Api.Models;
@@ -10,6 +11,7 @@ using Honeypot.Protocol.Abstractions.Models;
 using Honeypot.Shared.Models;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using OptionsFactory = Microsoft.Extensions.Options.Options;
@@ -18,7 +20,7 @@ using Xunit;
 namespace Honeypot.Runtime.Tests;
 
 /// <summary>隔离 SQLite 验证真实 SQL 聚合、幂等、半开边界和采集缺口。</summary>
-public sealed class ReportTests
+public sealed partial class ReportTests
 {
     private static readonly DateTimeOffset Start = new(2026, 11, 9, 16, 0, 0, TimeSpan.Zero);
 
@@ -178,6 +180,15 @@ public sealed class ReportTests
         Assert.Null(atHourBoundary[23].AcceptedConnections);
         Assert.Null(atHourBoundary[23].AuthenticationFailures);
         Assert.Equal("unknown", atHourBoundary[23].CoverageStatus);
+
+        // 首页复用卡片这一次事实读取，缺测、整点、旧报告以及截止毫秒仍需与独立报告逐桶一致。
+        var listener = new OverviewActivityTests.SnapshotListener(new("live", now, "192.0.2.1", 5000, "ssh", 22));
+        var storeAfterRestart = reopened.Store();
+        OverviewMetrics OverviewAt(DateTimeOffset at) => OverviewMetricsReader.Read(storeAfterRestart, reopened.Threats(),
+            listener, new InMemoryServiceInstanceStore(), at, includeHost: false, includeActivityCoverage: true);
+        Assert.Equal(trend, OverviewAt(now).ActivityByHour.ToArray());
+        Assert.Equal(atHourBoundary, OverviewAt(currentHour).ActivityByHour.ToArray());
+        Assert.Equal(3, OverviewAt(now).ReportOnlyEvents);
     }
 
     [Fact]
@@ -389,27 +400,25 @@ public sealed class ReportTests
     }
 
     [Fact]
-    public async Task BoundedWriterAdmitsOnlyCapacityAndSkipsCancelledPendingEvent()
+    public async Task BoundedWriterBackpressuresAndFinishesEventsAlreadyAdmitted()
     {
         await using var fixture = await Fixture.CreateAsync();
         using var evidence = new InMemoryCredentialEvidenceStore();
-        var settings = OptionsFactory.Create(new EventStorageOptions { QueueCapacity = 1 });
         var store = new ReportInteractionEventStore(fixture.Factory, evidence, fixture.Threats(), fixture.Health,
-            NullLogger<ReportInteractionEventStore>.Instance, options: settings);
-        using var cancellation = new CancellationTokenSource();
-        var pending = store.AppendAsync(Event("pending", "ConnectionAccepted", Start), cancellation.Token).AsTask();
-        Assert.Equal(1, fixture.Health.EventQueueDepth);
-        Assert.Equal("REPORT_EVENT_QUEUE_FULL", (await store.AppendAsync(Event("full", "ConnectionAccepted", Start))).Code);
-        cancellation.Cancel();
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pending);
-
+            NullLogger<ReportInteractionEventStore>.Instance, options: OptionsFactory.Create(new EventStorageOptions { QueueCapacity = 1 }));
+        using var caller = new CancellationTokenSource();
+        var first = store.AppendAsync(Event("first", "ConnectionAccepted", Start), caller.Token).AsTask();
+        var second = store.AppendAsync(Event("second", "ConnectionAccepted", Start)).AsTask();
+        Assert.False(second.IsCompleted);
+        caller.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => first);
         using var worker = new ReportEventWriterWorker(store);
         await worker.StartAsync(CancellationToken.None);
-        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-        await worker.StopAsync(deadline.Token);
+        Assert.True((await second.WaitAsync(TimeSpan.FromSeconds(5))).Recorded);
+        await worker.StopAsync(CancellationToken.None);
         await using var db = fixture.Factory.CreateDbContext();
-        Assert.Equal(0, await db.Set<ReportEventEntity>().CountAsync());
-        Assert.Equal(2, fixture.Health.RejectedEvents);
+        Assert.Equal(2, await db.Set<ReportEventEntity>().CountAsync());
+        Assert.Equal(0, fixture.Health.RejectedEvents);
         Assert.Equal(0, fixture.Health.EventQueueDepth);
     }
 
@@ -460,7 +469,7 @@ public sealed class ReportTests
         await fixture.SampleAsync(Start, Start.AddHours(1));
         await fixture.SampleAsync(now.AddHours(-1), now);
 
-        using var worker = new ReportEventRetentionWorker(fixture.Factory, options, fixture.Health, clock, new(clock),
+        using var worker = new ReportEventRetentionWorker(fixture.Factory, options, fixture.Health, clock, new(),
             NullLogger<ReportEventRetentionWorker>.Instance);
         await worker.RunOnceAsync(CancellationToken.None);
         await using var db = fixture.Factory.CreateDbContext();
@@ -479,71 +488,158 @@ public sealed class ReportTests
     }
 
     [Fact]
-    public async Task DiskBudgetStopsSQLiteGrowthAndRetentionAllowsReuse()
+    public async Task ReopenedDatabaseCanGrowPastLegacyBudgetAndReuseRetainedPages()
     {
-        var path = Path.Combine(Directory.CreateTempSubdirectory("honeypot-report-budget-").FullName, "budget.db");
-        await using var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Pooling = false }.ToString());
-        await connection.OpenAsync();
-        var factory = new Factory(new DbContextOptionsBuilder<HoneypotDbContext>().UseSqlite(connection).Options);
-        await using (var setup = factory.CreateDbContext()) await setup.Database.EnsureCreatedAsync();
-
-        // 利用正常报告事件与普通旧数据验证容量页限制，全部写入测试生成的独立文件。
-        var clock = new FixedTime(Start.AddDays(2));
-        var tightOptions = OptionsFactory.Create(new EventStorageOptions { DatabaseBudgetMiB = 8, MinimumFreeDiskMiB = 8, ReportRetentionDays = 1 });
-        var health = new ReportIngestionHealth();
-        var diskBudget = new ReportEventDiskBudget(clock);
-        using var evidence = new InMemoryCredentialEvidenceStore();
-        var threats = new SqliteThreatProfileStore(factory, tightOptions, clock, new ResourceIdGenerator());
-        var store = new ReportInteractionEventStore(factory, evidence, threats, health,
-            NullLogger<ReportInteractionEventStore>.Instance, options: tightOptions, time: clock, diskBudget: diskBudget);
-        using var writer = new ReportEventWriterWorker(store);
-        var now = clock.GetUtcNow();
-        await writer.StartAsync(CancellationToken.None);
-        try
+        var path = Path.Combine(Directory.CreateTempSubdirectory("honeypot-report-growth-").FullName, "report.db");
+        var now = Start.AddDays(2);
+        var clock = new FixedTime(now);
+        var storage = new EventStorageOptions();
+        var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
         {
-            await using var db = factory.CreateDbContext();
-            var before = new FileInfo(path).Length;
-            Assert.True((await store.AppendAsync(Event("limit-installed", "ConnectionAccepted", now))).Recorded);
-            await using var pragma = connection.CreateCommand();
-            pragma.CommandText = "PRAGMA page_size";
-            var pageSize = (long)(await pragma.ExecuteScalarAsync())!;
-            pragma.CommandText = "PRAGMA max_page_count";
-            Assert.Equal((7 * 1024 * 1024) / pageSize, (long)(await pragma.ExecuteScalarAsync())!);
-            Assert.True(health.DatabaseBytes >= before);
+            ["Honeypot:Events:DatabaseBudgetMiB"] = "8",
+            ["Honeypot:Events:MinimumFreeDiskMiB"] = "8",
+            ["Honeypot:Events:ReportRetentionDays"] = "1",
+        }).Build();
+        configuration.GetSection(EventStorageOptions.SectionName).Bind(storage);
 
-            await db.Database.ExecuteSqlInterpolatedAsync($"""
-                INSERT INTO report_events ("EventId", "OccurredAtUnixMs", "EventType", "SourceIp", "AdapterKey", "DestinationPort",
-                    "Username", "AuthenticationMethod", "IsAuthenticationFailure", "RiskSignal", "EvidenceKind", "CaptureTruncated")
-                VALUES ('old', {Start.ToUnixTimeMilliseconds()}, 'authenticationattempted', '192.0.2.11', 'ssh', 22,
-                    {new string('x', 6 * 1024 * 1024)}, 'password', 1, 'medium', 'none', 0)
-                """);
-            var highWater = new FileInfo(path).Length;
-            var tooLarge = await Assert.ThrowsAsync<SqliteException>(() => db.Database.ExecuteSqlInterpolatedAsync($"""
-                UPDATE report_events SET "Username"={new string('x', 8 * 1024 * 1024)} WHERE "EventId"='old'
-                """));
-            Assert.Equal(13, tooLarge.SqliteErrorCode);
-
-            using var retention = new ReportEventRetentionWorker(factory, tightOptions, health, clock, diskBudget,
-                NullLogger<ReportEventRetentionWorker>.Instance);
-            await retention.RunOnceAsync(CancellationToken.None);
-            pragma.CommandText = "PRAGMA freelist_count";
-            Assert.True((long)(await pragma.ExecuteScalarAsync())! > 1_000);
-            Assert.Equal(highWater, new FileInfo(path).Length);
-            Assert.True((await store.AppendAsync(Event("after-retention", "ConnectionAccepted", now))).Recorded);
-            Assert.Equal(highWater, new FileInfo(path).Length);
-
-            // 模拟升级前已有的过大数据库，接纳失败时原有事件仍可查询。
-            pragma.CommandText = "PRAGMA max_page_count = 100000";
-            await pragma.ExecuteScalarAsync();
-            await db.Database.ExecuteSqlInterpolatedAsync($"""
-                UPDATE report_events SET "Username"={new string('x', 9 * 1024 * 1024)} WHERE "EventId"='after-retention'
-                """);
-            Assert.Equal("REPORT_DISK_BUDGET_EXCEEDED", (await store.AppendAsync(Event("over-budget", "ConnectionAccepted", now))).Code);
-            Assert.True(health.DiskBudgetBlocked);
-            Assert.Equal(2, await db.Set<ReportEventEntity>().CountAsync());
-            Assert.DoesNotContain(store.GetAll(), item => item.EventId == "over-budget");
+        // 旧程序曾在自己的 SQLite 连接上设置页数限制；升级后复用原数据库和配置。
+        await using (var previous = await Fixture.CreateAsync(time: clock, storage: storage, databasePath: path))
+        {
+            Assert.True((await previous.Store().AppendAsync(Event("old", "ConnectionAccepted", Start))).Recorded);
+            await using var db = previous.Factory.CreateDbContext();
+            await db.Database.ExecuteSqlRawAsync("PRAGMA main.max_page_count = 1792");
         }
-        finally { await writer.StopAsync(CancellationToken.None); }
+
+        await using var fixture = await Fixture.CreateAsync(createSchema: false, time: clock, storage: storage, databasePath: path);
+        await using var reopened = fixture.Factory.CreateDbContext();
+        await using var pragma = reopened.Database.GetDbConnection().CreateCommand();
+        pragma.CommandText = "PRAGMA main.max_page_count";
+        var nativeMaxPages = (long)(await pragma.ExecuteScalarAsync())!;
+        Assert.True(nativeMaxPages > 1792);
+        var store = fixture.Store();
+        Assert.True((await store.AppendAsync(Event("after-upgrade", "ConnectionAccepted", now))).Recorded);
+        Assert.Equal(nativeMaxPages, (long)(await pragma.ExecuteScalarAsync())!);
+
+        // 给隔离数据库的旧报表记录扩容，确认超出旧配置的 8 MiB 后新事件仍能提交。
+        await reopened.Database.ExecuteSqlRawAsync("UPDATE report_events SET Username = zeroblob(9 * 1024 * 1024) WHERE EventId = 'old'");
+        Assert.True((await store.AppendAsync(Event("over-old-budget", "ConnectionAccepted", now))).Recorded);
+        Assert.True(fixture.Health.DatabaseBytes > 8L * 1024 * 1024);
+        Assert.False(fixture.Health.DiskBudgetBlocked);
+        Assert.Equal(0, fixture.Health.RejectedEvents);
+
+        using var retention = new ReportEventRetentionWorker(fixture.Factory, OptionsFactory.Create(storage), fixture.Health,
+            clock, new(), NullLogger<ReportEventRetentionWorker>.Instance);
+        await retention.RunOnceAsync(CancellationToken.None);
+        Assert.False(await reopened.Set<ReportEventEntity>().AnyAsync(item => item.EventId == "old"));
+        pragma.CommandText = "PRAGMA main.freelist_count";
+        Assert.True((long)(await pragma.ExecuteScalarAsync())! > 0);
+        pragma.CommandText = "PRAGMA main.page_count";
+        var pageCount = (long)(await pragma.ExecuteScalarAsync())!;
+        Assert.True((await store.AppendAsync(Event("after-retention", "ConnectionAccepted", now))).Recorded);
+        Assert.Equal(pageCount, (long)(await pragma.ExecuteScalarAsync())!);
+    }
+
+    [Fact]
+    public async Task LegacyFreeSpaceSettingCannotRejectARealWrite()
+    {
+        var path = Path.Combine(Directory.CreateTempSubdirectory("honeypot-retired-space-option-").FullName, "report.db");
+        var storage = new EventStorageOptions();
+        new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Honeypot:Events:MinimumFreeDiskMiB"] = int.MaxValue.ToString(),
+        }).Build().GetSection(EventStorageOptions.SectionName).Bind(storage);
+        await using var fixture = await Fixture.CreateAsync(storage: storage, databasePath: path);
+        Assert.True((await fixture.Store().AppendAsync(Event("old-limit", "ConnectionAccepted", Start))).Recorded);
+        Assert.False(fixture.Health.DiskBudgetBlocked);
+        Assert.Equal(0, fixture.Health.RejectedEvents);
+    }
+
+    [Fact]
+    public async Task BusyWriterRetriesAfterExternalWriterReleasesAndCommitsOnce()
+    {
+        var path = Path.Combine(Directory.CreateTempSubdirectory("honeypot-contention-").FullName, "report.db");
+        await using var fixture = await Fixture.CreateAsync(databasePath: path);
+        var store = fixture.Store();
+        await using var blocker = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Pooling = false }.ToString());
+        await blocker.OpenAsync();
+        using var lockTransaction = blocker.BeginTransaction(deferred: false);
+        var task = store.AppendAsync(Event("locked-once", "ConnectionAccepted", Start)).AsTask();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+        while (fixture.Health.LockRetries == 0) await Task.Delay(20, timeout.Token);
+        lockTransaction.Rollback();
+        Assert.True((await task.WaitAsync(timeout.Token)).Recorded);
+        Assert.Equal(1, fixture.Health.LockRetries);
+        Assert.Equal(0, fixture.Health.RejectedEvents);
+        Assert.True((await store.AppendAsync(Event("locked-once", "ConnectionAccepted", Start))).IsDuplicate);
+        await using var db = fixture.Factory.CreateDbContext();
+        Assert.Equal(1, await db.Set<ReportEventEntity>().CountAsync());
+    }
+
+    [Fact]
+    public async Task SqliteFullReportsFailureWithoutPartialRowsAndRecoversOnReplay()
+    {
+        // 让 SQLite 自己返回真实 SQLITE_FULL，限制仅适用于本临时库的连接。
+        var path = Path.Combine(Directory.CreateTempSubdirectory("honeypot-full-").FullName, "report.db");
+        await using var fixture = await Fixture.CreateAsync(databasePath: path);
+        var store = fixture.Store();
+        await using var db = fixture.Factory.CreateDbContext();
+        using var command = db.Database.GetDbConnection().CreateCommand();
+        command.CommandText = "PRAGMA page_count";
+        var pages = (long)(await command.ExecuteScalarAsync())!;
+        command.CommandText = $"PRAGMA max_page_count={pages}";
+        await command.ExecuteScalarAsync();
+        InteractionEvent? failed = null;
+        for (var i = 0; i < 100; i++)
+        {
+            var item = Event($"full-{i}", "ConnectionAccepted", Start) with { PayloadSummary = new string('x', 512) };
+            var result = await store.AppendAsync(item);
+            if (!result.Recorded)
+            {
+                Assert.Equal("SQLITE_FULL", result.Code);
+                failed = item;
+                break;
+            }
+        }
+        Assert.NotNull(failed);
+        Assert.True(fixture.Health.DiskBudgetBlocked);
+        Assert.Equal("SQLITE_FULL", fixture.Health.FaultsByStage["event.commit"].LastCode);
+        Assert.NotNull(fixture.Health.FaultsByStage["event.commit"].SinceUtc);
+        Assert.True(fixture.Health.FailureSinceUtc.HasValue);
+        Assert.False(await db.Set<ReportEventEntity>().AnyAsync(e => e.EventId == failed.EventId));
+        Assert.DoesNotContain(store.GetByConnectionId(failed.ConnectionId), e => e.EventId == failed.EventId);
+        command.CommandText = "PRAGMA max_page_count=1000000";
+        await command.ExecuteScalarAsync();
+        Assert.True((await store.AppendAsync(failed)).Recorded);
+        Assert.False(fixture.Health.DiskBudgetBlocked);
+        Assert.True(fixture.Health.LastRecoveredAtUtc.HasValue);
+        Assert.Null(fixture.Health.FaultsByStage["event.commit"].SinceUtc);
+        Assert.NotNull(fixture.Health.FaultsByStage["event.commit"].LastRecoveredAtUtc);
+        Assert.True((await store.AppendAsync(failed)).IsDuplicate);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task PostCommitFileObservationFailureNeverRejectsCommittedEvent(bool denied)
+    {
+        var path = Path.Combine(Directory.CreateTempSubdirectory("honeypot-observe-failure-").FullName, "report.db");
+        await using var fixture = await Fixture.CreateAsync(databasePath: path);
+        using var evidence = new InMemoryCredentialEvidenceStore();
+        var monitor = new ReportEventDiskBudget(_ => throw (denied ? new UnauthorizedAccessException() : new IOException()),
+            _ => denied ? throw new UnauthorizedAccessException() : 8);
+        monitor.SampleFreeBytes(path, fixture.Health);
+        Assert.Equal(denied ? "unknown" : "low", fixture.Health.DiskSpaceStatus);
+        var store = new ReportInteractionEventStore(fixture.Factory, evidence, fixture.Threats(), fixture.Health,
+            NullLogger<ReportInteractionEventStore>.Instance, diskBudget: monitor);
+        using var worker = new ReportEventWriterWorker(store);
+        await worker.StartAsync(CancellationToken.None);
+        var persisted = await store.AppendAsync(Event("observation-failed", "ConnectionAccepted", Start));
+        Assert.True(persisted.Recorded);
+        Assert.False(persisted.IsDuplicate);
+        Assert.True((await store.AppendAsync(Event("observation-failed", "ConnectionAccepted", Start))).IsDuplicate);
+        Assert.Equal(0, fixture.Health.RejectedEvents);
+        Assert.Equal(2, fixture.Health.FileObservationFailures);
+        await worker.StopAsync(CancellationToken.None);
     }
 
     private static InteractionEvent Event(string id, string type, DateTimeOffset at) => new()

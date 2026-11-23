@@ -9,7 +9,12 @@
 - **MCP 服务**：管理台「系统管理 → MCP 服务」可为智能体启用同源 `/mcp` 接入并创建 API Key。支持按业务模块和实例范围逐项授权、只读/读写模式与有效期；Key 明文只在创建时展示一次，服务端只保存不可逆摘要。调用记录包含来源 IP、Key、工具、结果与耗时，默认留存 30 天（可设 1–365 天），`Authorization`、Cookie 与明文密钥不进入审计库。
 - **MCP 工具集**：运行总览、服务与监听查询、实例启停与启动策略、威胁事件与来源档案、认证证据摘要、运行报告与历史快照、Syslog 与邮件状态；不提供通用 HTTP 转发、Shell、SQL 或任意网络访问。
 - **MCP 传输边界**：同源 Streamable HTTP，接入使用 HTTPS 的 `/mcp`；反向代理需转发 `/mcp` 且不缓冲响应。
-- **业务数据持久化**：详细事件、威胁档案、加密认证证据、密码簿统计依据、关键管理操作审计与报告数据统一写入 SQLite；迁移 `20261115085711_BusinessDataPersistence` 增加五张表与索引。各类留存按配置分批清理，数据库与磁盘预算触发阈值时按采集失败处理。
+- **业务数据持久化**：详细事件、威胁档案、加密认证证据、密码簿统计依据、关键管理操作审计与报告数据统一写入 SQLite；迁移 `20261115085711_BusinessDataPersistence` 增加五张表与索引。各类留存按配置分批清理。
+- **连接摘要与短留策略**：迁移 `20261119111011_ConnectionSummaries` 新增连接摘要并从真实连接明细回填；正常握手明细默认留存 48 小时，连接、认证、异常与威胁档案默认 30 天。历史 `DatabaseBudgetMiB`、`MinimumFreeDiskMiB`、`MaxStoredMiB` 预算已失效，改由 SQLite 实际空间、锁与 I/O 错误及存储指标定位。
+- **运行总览下钻与快照**：新增 `GET /api/v1/metrics/summary` 与连接摘要接口；首页下钻携带 `asOfUtc` 快照，活动连接快照保留 5 分钟，过期返回 HTTP 410 `OVERVIEW_SNAPSHOT_EXPIRED`。接纳连接口径改为滚动 24 小时，认证失败覆盖 `failure`、`rejected`、`invalid`。
+- **连接地图摘要读取**：地图改为读取持久连接摘要，并按 `Honeypot:AttackMap:Target` 的坐标、公网入口与落点名称定位。
+- **存储观测**：首页与指标摘要返回 `eventStorage`，包含 `lockRetries`、`rejectedEvents`、`writeFailuresByCode`、`faultsByStage`、`databaseBytes`、`freeDiskBytes` 与 `diskSpaceStatus`。
+- **SQLite 容量验收工具**：`backend/tests/Honeypot.Storage.LoadTest` 提供夹具生成、全量回放、快照对照与对账脚本，只使用合成数据和临时目录。
 - **运行总览连接明细**：活动连接、今日认证失败、威胁来源与协议活动可按指标展开分页明细，显示归属地；认证失败明细可关联认证证据。
 - **实时飞线地图**：运行总览新增二维请求流向地图，支持窗口切换、暂停飞线、缩放拖动与全屏；底图使用 `world-atlas@2.0.2`，来源与许可见 `frontend/public/assets/maps/`。
 - **密码簿**：管理员按账号或服务查询认证组合的尝试次数与最近使用时间，按页读取原文并导出 CSV，每次原文访问独立审计。

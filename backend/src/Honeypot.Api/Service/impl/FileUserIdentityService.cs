@@ -202,7 +202,7 @@ public sealed class FileUserIdentityService : IUserIdentityService, IDisposable
         }
         catch (JsonException)
         {
-            throw new InvalidOperationException("USER_STORE_INVALID");
+            throw new InvalidOperationException($"用户文件格式无效：{_usersFilePath}");
         }
     }
 

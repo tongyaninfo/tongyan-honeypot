@@ -5,81 +5,96 @@ using Honeypot.Api.Common;
 using Honeypot.Api.Data;
 using Honeypot.Api.Data.Models;
 using Honeypot.Api.Models;
-using Honeypot.Api.Options;
 using Honeypot.Protocol.Abstractions.Models;
 using Honeypot.Shared.Models;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Options;
 
 namespace Honeypot.Api.Service.impl;
 
 /// <summary>凭据只保存密文。密码簿依据有效凭据中的已确认认证事件生成。</summary>
 public sealed class SqliteCredentialEvidenceStore(IDbContextFactory<HoneypotDbContext> factory,
-    CredentialEvidenceKeys keys, TimeProvider clock, ReportEventDiskBudget diskBudget,
-    ReportIngestionHealth health, IOptions<EventStorageOptions> options, IOptions<CredentialEvidenceOptions> evidenceOptions,
+    CredentialEvidenceKeys keys, TimeProvider clock, ReportIngestionHealth health,
     ISyslogPublisher? syslog = null)
     : ICredentialEvidenceStore
 {
-    private const int MiB = 1024 * 1024;
-    private const int MaxEvidenceBytes = 4 * MiB;
-
-    public async Task<CredentialEvidenceSummary> SaveAsync(string connectionId, string eventId, string sourceIp,
-        string adapterKey, string materialType, string content, int retentionDays, CancellationToken cancellationToken = default)
+    // 加密、HMAC 与密钥读取均在 SQLite 写锁外完成，只将有界生命周期的密文传给写入器。
+    internal async Task<CredentialEvidenceEntity> PrepareAsync(string connectionId, string eventId, string sourceIp,
+        string adapterKey, string materialType, string content, int retentionDays, CancellationToken cancellationToken,
+        InteractionEvent? authentication = null)
     {
-        cancellationToken.ThrowIfCancellationRequested();
         if (retentionDays is < 1 or > 3650) throw new ArgumentOutOfRangeException(nameof(retentionDays));
         if (!ValidMetadata(connectionId, 128) || !ValidMetadata(eventId, 128) || !ValidMetadata(sourceIp, 64) ||
             !ValidMetadata(adapterKey, 64) || !ValidMetadata(materialType, 64))
             throw new ArgumentException("CREDENTIAL_EVIDENCE_INVALID_METADATA");
+        await using var db = await factory.CreateDbContextAsync(cancellationToken);
+        SetTimeout(db);
+        using var key = keys.Read(mayInitialize: !await db.Set<CredentialEvidenceEntity>().AnyAsync(cancellationToken));
+        var capturedAt = clock.GetUtcNow().ToUniversalTime();
+        var summary = new CredentialEvidenceSummary($"cred-{Guid.NewGuid():N}", connectionId, eventId, sourceIp, adapterKey,
+            materialType, capturedAt, capturedAt.AddDays(retentionDays), false);
+        var row = Encrypt(summary, content, Encoding.UTF8.GetByteCount(content), key);
+        if (authentication is not null && OverviewActivityProjection.IsAuthenticationFailure(authentication) &&
+            !authentication.CaptureTruncated && !string.IsNullOrEmpty(authentication.Username) &&
+            PasswordBookProjection.IsCandidateMaterialType(materialType))
+        {
+            var bytes = Encoding.UTF8.GetBytes(content);
+            try
+            {
+                var candidate = PasswordBookProjection.ReadCandidate(bytes, adapterKey, materialType, key.FingerprintKey);
+                if (candidate is not null && candidate.IsCompatibleWith(authentication.AuthenticationMethod) &&
+                    candidate.EventUsername == authentication.Username)
+                {
+                    row.PasswordBookFingerprint = candidate.Fingerprint;
+                    row.PasswordBookUsername = authentication.Username;
+                    row.PasswordBookOccurredAtUtcTicks = authentication.OccurredAtUtc.UtcTicks;
+                }
+            }
+            finally { CryptographicOperations.ZeroMemory(bytes); }
+        }
+        return row;
+    }
 
+    internal static async Task CheckKeyAsync(HoneypotDbContext db, string keyId, CancellationToken ct)
+    {
+        // KeyId 索引的两个端点能发现任一不匹配密钥，无需遍历全部有效证据。
+        var keys = db.Set<CredentialEvidenceEntity>().Select(e => e.KeyId);
+        var first = await keys.OrderBy(k => k).FirstOrDefaultAsync(ct);
+        if (first is not null && (first != keyId || await keys.OrderByDescending(k => k).FirstAsync(ct) != keyId))
+            throw new CryptographicException("CREDENTIAL_EVIDENCE_KEY_MISMATCH");
+    }
+
+    public async Task<CredentialEvidenceSummary> SaveAsync(string connectionId, string eventId, string sourceIp,
+        string adapterKey, string materialType, string content, int retentionDays, CancellationToken cancellationToken = default)
+    {
         try
         {
-            var contentBytes = Encoding.UTF8.GetByteCount(content);
-            if (contentBytes > MaxEvidenceBytes) throw new InvalidOperationException("CREDENTIAL_STORE_CAPACITY_EXCEEDED");
-
+            var row = await PrepareAsync(connectionId, eventId, sourceIp, adapterKey, materialType, content, retentionDays, cancellationToken);
             await using var db = await factory.CreateDbContextAsync(cancellationToken);
             SetTimeout(db);
-            await db.Database.OpenConnectionAsync(cancellationToken);
-            if (!await diskBudget.CanWriteAsync(db, options.Value, health, cancellationToken))
-                throw new InvalidOperationException("CREDENTIAL_EVIDENCE_DISK_BUDGET_EXCEEDED");
-
             await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
-            var capturedAt = clock.GetUtcNow();
-            var entries = db.Set<CredentialEvidenceEntity>();
-            // 同一写事务检查有效证据的总字节数并落盘，避免并发采集同时越过上限。
-            var storedBytes = await entries.Where(row => row.RetentionUntilUtcTicks > capturedAt.UtcTicks)
-                .SumAsync(row => (long)row.ContentBytes, cancellationToken);
-            if (storedBytes + contentBytes > (long)evidenceOptions.Value.MaxStoredMiB * MiB)
-                throw new InvalidOperationException("CREDENTIAL_STORE_CAPACITY_EXCEEDED");
-
-            using var key = keys.Read(mayInitialize: !await entries.AnyAsync(cancellationToken));
-            if (await entries.AnyAsync(row => row.KeyId != key.Id, cancellationToken))
-                throw new CryptographicException("CREDENTIAL_EVIDENCE_KEY_MISMATCH");
-
-            var summary = new CredentialEvidenceSummary($"cred-{Guid.NewGuid():N}", connectionId, eventId, sourceIp,
-                adapterKey, materialType, capturedAt.ToUniversalTime(), capturedAt.AddDays(retentionDays).ToUniversalTime(), false);
-            entries.Add(Encrypt(summary, content, contentBytes, key));
+            await CheckKeyAsync(db, row.KeyId, cancellationToken);
+            db.Add(row);
             await db.SaveChangesAsync(cancellationToken);
             await transaction.CommitAsync(cancellationToken);
             health.SetDiskBudgetBlocked(false);
-            SyslogInteractionProjection.PublishSafely(syslog, "honeypot-evidence", "EVIDENCE_CAPTURED", SyslogSeverity.Informational,
-                new Dictionary<string, object?> { ["credentialArtifactId"] = summary.CredentialArtifactId, ["eventId"] = eventId,
-                    ["connectionId"] = connectionId, ["adapterKey"] = adapterKey, ["materialType"] = materialType,
-                    ["outcome"] = "captured" });
-            return summary;
+            PublishCaptured(row);
+            return ToSummary(row);
         }
         catch (Exception error) when (error is not OperationCanceledException)
         {
             if ((error is DbUpdateException ? error.InnerException : error) is SqliteException { SqliteErrorCode: 13 })
                 health.SetDiskBudgetBlocked(true);
-            // 日志只保留有界元数据。数据库和文件异常可能附带路径或用户数据。
             SyslogInteractionProjection.PublishSafely(syslog, "honeypot-evidence", "EVIDENCE_CAPTURE_FAILED", SyslogSeverity.Error,
-                new Dictionary<string, object?> { ["eventId"] = eventId, ["connectionId"] = connectionId,
-                    ["adapterKey"] = adapterKey, ["errorCode"] = "EVIDENCE_CAPTURE_FAILED" });
+                new Dictionary<string, object?> { ["eventId"] = eventId, ["connectionId"] = connectionId, ["errorCode"] = "EVIDENCE_CAPTURE_FAILED" });
             throw;
         }
     }
+
+    internal void PublishCaptured(CredentialEvidenceEntity row) =>
+        SyslogInteractionProjection.PublishSafely(syslog, "honeypot-evidence", "EVIDENCE_CAPTURED", SyslogSeverity.Informational,
+            new Dictionary<string, object?> { ["credentialArtifactId"] = row.ArtifactId, ["eventId"] = row.EventId,
+                ["connectionId"] = row.ConnectionId, ["adapterKey"] = row.AdapterKey, ["materialType"] = row.MaterialType, ["outcome"] = "captured" });
 
     public CredentialEvidenceView? Get(string credentialArtifactId)
     {

@@ -37,9 +37,7 @@ public sealed class InMemoryCredentialEvidenceStore : ICredentialEvidenceStore, 
     private readonly ISyslogPublisher? _syslog;
     private readonly ITimer _expirationTimer;
     private readonly object _gate = new();
-    private long _storedBytes;
     private bool _disposed;
-    private const long MaxStoredBytes = 64 * 1024 * 1024;
 
     public InMemoryCredentialEvidenceStore(TimeProvider? clock = null, ISyslogPublisher? syslog = null)
     {
@@ -61,8 +59,6 @@ public sealed class InMemoryCredentialEvidenceStore : ICredentialEvidenceStore, 
                 ObjectDisposedException.ThrowIf(_disposed, this);
                 var capturedAt = _clock.GetUtcNow();
                 PurgeExpiredLocked(capturedAt);
-                if (byteCount > 4 * 1024 * 1024 || _storedBytes + byteCount > MaxStoredBytes)
-                    throw new InvalidOperationException("CREDENTIAL_STORE_CAPACITY_EXCEEDED");
                 var artifactId = $"cred-{Guid.NewGuid():N}";
                 var summary = new CredentialEvidenceSummary(artifactId, connectionId, eventId, sourceIp, adapterKey,
                     materialType, capturedAt, capturedAt.AddDays(retentionDays), false);
@@ -81,7 +77,6 @@ public sealed class InMemoryCredentialEvidenceStore : ICredentialEvidenceStore, 
                 finally { CryptographicOperations.ZeroMemory(plaintext); }
                 _items[artifactId] = new(summary, nonce, tag, ciphertext, candidate);
                 _expirations.Enqueue(artifactId, summary.RetentionUntilUtc);
-                _storedBytes += ciphertext.Length;
                 SyslogInteractionProjection.PublishSafely(_syslog, "honeypot-evidence", "EVIDENCE_CAPTURED", SyslogSeverity.Informational,
                     new Dictionary<string, object?> { ["credentialArtifactId"] = artifactId, ["eventId"] = eventId,
                         ["connectionId"] = connectionId, ["adapterKey"] = adapterKey, ["materialType"] = materialType,
@@ -188,7 +183,6 @@ public sealed class InMemoryCredentialEvidenceStore : ICredentialEvidenceStore, 
         {
             _expirations.Dequeue();
             if (!_items.Remove(artifactId, out var expired)) continue;
-            _storedBytes -= expired.Ciphertext.Length;
             CryptographicOperations.ZeroMemory(expired.Ciphertext);
             if (expired.ConfirmedAttempt is { } attempt && expired.Candidate is { } candidate)
             {

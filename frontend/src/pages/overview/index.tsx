@@ -75,6 +75,7 @@ const resultLabels: Record<string, string> = {
   completed: '已完成',
   failure: '失败',
   rejected: '已拒绝',
+  admission_rejected: '准入拒绝',
   observed: '已观察',
   recorded: '已记录',
   sent: '已发送',
@@ -212,10 +213,20 @@ const OverviewPage: React.FC = () => {
           credentialCount={data.credentials}
         />
         {!loading && !data.metricsAvailable && <Alert title="运行指标暂不可用" type="warning" showIcon />}
-        {storage && (storage.diskBudgetBlocked || !storage.retentionAvailable) && (
+        {(metrics.reportOnlyEvents ?? 0) > 0 && <Alert type="info" showIcon
+          title={`近 24 小时有 ${metrics.reportOnlyEvents} 条旧版记录仅用于报告趋势，缺少可回溯的连接详情。`} />}
+        {storage && (storage.diskBudgetBlocked || storage.failureSinceUtc || !storage.retentionAvailable || storage.diskSpaceStatus === 'low') && (
           <Alert
-            title={storage.diskBudgetBlocked ? '事件存储已触发磁盘保护' : '事件留存任务异常'}
-            description={`待写入 ${storage.queueDepth} 条，累计拒绝写入 ${storage.rejectedEvents} 条。`}
+            title="事件存储告警"
+            description={<Space wrap>
+              {storage.diskBudgetBlocked && <span>SQLite 报告磁盘已满</span>}
+              {storage.diskSpaceStatus === 'low' && storage.freeDiskBytes != null && <span>磁盘剩余 {Math.floor(storage.freeDiskBytes / 1024 / 1024)} MiB</span>}
+              {!storage.retentionAvailable && <span>事件留存任务异常</span>}
+              {storage.failureSinceUtc && <span>写入故障始于 {eventTime.format(new Date(storage.failureSinceUtc))}</span>}
+              <span>待写入 {storage.queueDepth} 条，累计写入失败 {storage.rejectedEvents} 条</span>
+              {storage.lockRetries != null && <span>锁重试 {storage.lockRetries} 次</span>}
+              {storage.writeFailuresByCode && <span>锁冲突最终失败 BUSY {storage.writeFailuresByCode.SQLITE_BUSY ?? 0} / LOCKED {storage.writeFailuresByCode.SQLITE_LOCKED ?? 0}</span>}
+            </Space>}
             type="warning"
             showIcon
           />
@@ -223,7 +234,7 @@ const OverviewPage: React.FC = () => {
         <OverviewConnectionMap dark={dark} {...connectionMap} />
         <Row gutter={[16, 16]}>
           <Col xs={24} xl={12}>
-            <AdapterActivityCard activity={metrics.adapterActivity} loading={loading} />
+            <AdapterActivityCard activity={metrics.adapterActivity} asOfUtc={metrics.generatedAtUtc} loading={loading} />
           </Col>
           <Col xs={24} xl={12}>
             <RiskSourcesCard threats={data.threats} loading={loading} />

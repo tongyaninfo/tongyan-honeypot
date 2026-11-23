@@ -3,7 +3,7 @@ import { Popover, Table, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { createStyles } from 'antd-style';
 import type { ReactNode } from 'react';
-import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { SourceIpLocation } from '@/components/SourceIp';
 import {
   getOverviewConnections,
@@ -69,6 +69,7 @@ const connectionColumns: ColumnsType<OverviewConnectionRow> = [
 
 const sourceActivityNames: Record<string, string> = {
   connectionaccepted: '已接纳连接',
+  connectionrejected: '准入拒绝',
   authenticationattempted: '认证失败',
   protocolviolation: '协议异常',
 };
@@ -168,7 +169,7 @@ interface ConnectionPage {
   page: number;
   rows: OverviewConnectionRow[];
   total: number;
-  error?: boolean;
+  error?: string;
 }
 
 export function OverviewConnectionsDetails({
@@ -194,7 +195,7 @@ export function OverviewConnectionsDetails({
           pageSize,
         });
         if (!response.success || !response.data)
-          throw new Error('Preview unavailable');
+          throw new Error(response.code);
         if (!current) return;
         const { items, total } = response.data;
         const lastPage = Math.max(1, Math.ceil(total / pageSize));
@@ -205,13 +206,15 @@ export function OverviewConnectionsDetails({
           return;
         }
         setResult({ page, rows: items, total });
-      } catch {
+      } catch (error) {
+        const expired = (error as { response?: { status?: number } } | null)?.response?.status === 410
+          || (error instanceof Error && error.message === 'OVERVIEW_SNAPSHOT_EXPIRED');
         if (current)
           setResult((previous) => ({
             page,
             rows: [],
-            total: previous?.total ?? 0,
-            error: true,
+            total: expired ? 0 : previous?.total ?? 0,
+            error: expired ? '活动连接快照已过期，请刷新首页后重新打开明细。' : '连接明细暂不可用',
           }));
       }
     }
@@ -258,7 +261,7 @@ export function OverviewConnectionsDetails({
         styles: { root: { marginBottom: 0 } },
       }}
       locale={{
-        emptyText: result?.error ? '连接明细暂不可用' : '暂无连接记录',
+        emptyText: result?.error ?? '暂无连接记录',
       }}
     />
   );
@@ -267,20 +270,25 @@ export function OverviewConnectionsDetails({
 interface OverviewConnectionsPopoverProps {
   scope: OverviewConnectionScope;
   label: string;
+  asOfUtc?: string;
   children: ReactNode;
 }
 
 export default function OverviewConnectionsPopover({
   scope,
   label,
+  asOfUtc,
   children,
 }: OverviewConnectionsPopoverProps) {
   const { styles } = useStyles();
-  const [open, setOpen] = useState(false);
+  const [filter, setFilter] = useState<OverviewConnectionFilter>();
+  const open = Boolean(filter);
+  // 打开时固定该卡片的统计时点，后续自动刷新不能改变翻页的时间窗。
+  const setOpen = (visible: boolean) => setFilter((current) =>
+    visible ? current ?? (asOfUtc ? { scope, asOfUtc } : { scope }) : undefined);
   const button = useRef<HTMLButtonElement>(null);
   const popupId = useId();
   const popupTitle = scope === 'threatConnections' ? '威胁 IP 最近连接' : label;
-  const filter = useMemo(() => ({ scope }), [scope]);
 
   return (
     <div
@@ -311,7 +319,7 @@ export default function OverviewConnectionsPopover({
         // 气泡紧跟指标按钮，键盘可以按 Tab 进入分页控件。
         getPopupContainer={(trigger) => trigger.parentElement ?? trigger}
         content={
-          open ? (
+          filter ? (
             <div
               id={popupId}
               className={

@@ -160,24 +160,7 @@ public sealed class NfsAdapter : ProtocolAdapterBase
         {
             AuthenticationMethod = method, AuthenticationFailureCode = failure, MaterialType = type, CredentialCaptureStatus = "Disabled",
         };
-        var stage = "CredentialCaptureFailed";
-        try
-        {
-            if (profile.StoreCredentialEvidence && profile.RecordPassword)
-            {
-                var artifact = await StoreAsync(sink, context, access.EventId, type, material, profile, ct);
-                access = access with { CredentialArtifactId = artifact, CredentialCaptureStatus = "Captured" };
-            }
-            stage = "AuthenticationEventWriteFailed";
-            if (!(await sink.AppendAsync(access, ct)).Recorded) throw new AuthenticationRecordingException(stage);
-        }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-        catch (Exception)
-        {
-            try { await sink.AppendAsync(Event(context, stage, "authorization", "storage_failed", "NFS evidence could not be recorded"), ct); }
-            catch (Exception) { /* 不将证据内容或存储异常传播到日志。 */ }
-            throw new AuthenticationRecordingException(stage);
-        }
+        await RecordAccessAsync(sink, access, profile, type, material, ct);
     }
     private sealed class NfsBudgetException : Exception;
 }

@@ -9,6 +9,7 @@ public sealed record OverviewMetrics
 {
     public required DateTimeOffset GeneratedAtUtc { get; init; }
     public required int EventCount { get; init; }
+    public int ReportOnlyEvents { get; init; }
     public required int AcceptedConnections { get; init; }
     public required int AuthenticationAttempts { get; init; }
     public required int AuthenticationFailures { get; init; }
@@ -16,6 +17,7 @@ public sealed record OverviewMetrics
     public required int ProtocolViolations { get; init; }
     public required int SessionClosed { get; init; }
     public required int ThreatIpCount { get; init; }
+    public int? TraceableThreatIpCount { get; init; }
     public required int ServiceInstanceCount { get; init; }
     public required int ListenerCount { get; init; }
     public required int RunningListenerCount { get; init; }
@@ -33,12 +35,34 @@ public sealed record OverviewMetrics
     public EventStorageMetrics? EventStorage { get; init; }
 }
 
+public sealed record StorageFaultPeriod(long Occurrences, string LastCode, DateTimeOffset? SinceUtc,
+    DateTimeOffset LastFailureAtUtc, DateTimeOffset? LastRecoveredAtUtc);
+
 public sealed record EventStorageMetrics(int QueueDepth, long RejectedEvents, long DatabaseBytes, bool DiskBudgetBlocked,
     bool RetentionAvailable, DateTimeOffset? LastPersistedAtUtc)
 {
+    public long LockRetries { get; init; }
+    public long FileObservationFailures { get; init; }
+    public long? FreeDiskBytes { get; init; }
+    public string DiskSpaceStatus { get; init; } = "unknown";
+    public IReadOnlyDictionary<string, long> WriteFailuresByCode { get; init; } = new Dictionary<string, long>();
+    public IReadOnlyDictionary<string, StorageFaultPeriod> FaultsByStage { get; init; } = new Dictionary<string, StorageFaultPeriod>();
+    public DateTimeOffset? FailureSinceUtc { get; init; }
+    public DateTimeOffset? LastRecoveredAtUtc { get; init; }
+
     internal static EventStorageMetrics From(Service.impl.ReportIngestionHealth health) => new(
         health.EventQueueDepth, health.RejectedEvents, health.DatabaseBytes, health.DiskBudgetBlocked,
-        health.RetentionAvailable, health.LastPersistedAtUtc);
+        health.RetentionAvailable, health.LastPersistedAtUtc)
+        {
+            LockRetries = health.LockRetries,
+            FileObservationFailures = health.FileObservationFailures,
+            FreeDiskBytes = health.FreeDiskBytes,
+            DiskSpaceStatus = health.DiskSpaceStatus,
+            WriteFailuresByCode = health.Errors,
+            FaultsByStage = health.FaultsByStage,
+            FailureSinceUtc = health.FailureSinceUtc,
+            LastRecoveredAtUtc = health.LastRecoveredAtUtc,
+        };
 }
 
 public sealed record HostOverview(

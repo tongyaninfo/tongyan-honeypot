@@ -21,7 +21,6 @@ public sealed class ReportRuntimeSamplerWorker(
     TimeProvider time,
     IConfiguration configuration,
     IHostEnvironment environment,
-    IOptions<EventStorageOptions> options,
     ReportEventDiskBudget diskBudget,
     ILogger<ReportRuntimeSamplerWorker> logger,
     ISyslogPublisher? logs = null) : BackgroundService
@@ -33,6 +32,7 @@ public sealed class ReportRuntimeSamplerWorker(
         double? previousCpuMs = null;
         long? previousTimestamp = null;
         var consecutiveFailures = 0;
+        string? previousDiskStatus = null;
         var directory = configuration["Honeypot:DataDirectory"];
         if (string.IsNullOrWhiteSpace(directory)) directory = Path.Combine(environment.ContentRootPath, "data");
         using var process = Process.GetCurrentProcess();
@@ -58,7 +58,7 @@ public sealed class ReportRuntimeSamplerWorker(
                     CoverageStartAtUnixMs = previousSample is { } previous && now > previous && now - previous <= 60_000 && failures == 0 ? previous : now,
                     ProcessCpuPercent = elapsedMs > 0 && previousCpuMs is { } cpu ? Math.Clamp(100d * (cpuMs - cpu) / elapsedMs / Environment.ProcessorCount, 0, 100) : null,
                     ProcessMemoryBytes = process.WorkingSet64,
-                    DataDiskFreeBytes = ReportEventDiskBudget.ReadDiskFreeBytes(directory),
+                    DataDiskFreeBytes = diskBudget.SampleFreeBytes(directory, health),
                     ActiveConnections = statuses.Sum(item => (long)item.ActiveConnections),
                     // 仅期望运行的监听器计入正常采样分母，主动停止不算故障。
                     ConfiguredListeners = expected.Count,
@@ -66,19 +66,23 @@ public sealed class ReportRuntimeSamplerWorker(
                     FailedListeners = expectedStatuses.Count(item => item.State.Equals("Failed", StringComparison.OrdinalIgnoreCase)),
                     PersistenceFailures = failures,
                 };
+                // 低水位与探测不可用仅触发告警，绝不能在 SQLite 返回前推断写入失败。
+                var diskStatus = health.DiskSpaceStatus;
+                if (diskStatus != previousDiskStatus)
+                {
+                    if (diskStatus != "available")
+                        logger.LogWarning("Data volume monitoring warning. Status={Status} FreeBytes={FreeBytes}", diskStatus, sample.DataDiskFreeBytes);
+                    else if (previousDiskStatus is not null)
+                        logger.LogInformation("Data volume monitoring recovered.");
+                    previousDiskStatus = diskStatus;
+                }
                 await using var db = await factory.CreateDbContextAsync(stoppingToken);
                 db.Database.SetCommandTimeout(2);
                 await db.Database.OpenConnectionAsync(stoppingToken);
-                if (!await diskBudget.CanWriteAsync(db, options.Value, health, stoppingToken))
-                {
-                    previousSample = null;
-                    previousCpuMs = null;
-                    previousTimestamp = null;
-                    health.RecordFailure();
-                    continue;
-                }
+                diskBudget.Observe(db, health);
                 db.Set<ReportRuntimeSampleEntity>().Add(sample);
                 await db.SaveChangesAsync(stoppingToken);
+                health.RecoverStage("sample.commit");
                 if (consecutiveFailures >= 3)
                     logs?.Publish("honeypot-report", "REPORT_SAMPLING_RECOVERED", SyslogSeverity.Notice);
                 consecutiveFailures = 0;
@@ -94,6 +98,7 @@ public sealed class ReportRuntimeSamplerWorker(
                 previousCpuMs = null;
                 previousTimestamp = null;
                 health.RecordFailure();
+                health.RecordStageFault("sample.commit", ReportIngestionHealth.Classify(error));
                 if ((error is DbUpdateException ? error.InnerException : error) is SqliteException { SqliteErrorCode: 13 })
                     health.SetDiskBudgetBlocked(true);
                 consecutiveFailures++;

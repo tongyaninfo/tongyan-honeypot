@@ -96,7 +96,7 @@ public sealed class ManagementOperationAuditTests
     }
 
     [Fact]
-    public async Task PublicAuthenticationNoiseDoesNotFillAuditStorageOrChangeAuthenticationResults()
+    public async Task EveryFailedLoginIsAuditedWithoutChangingAuthenticationResults()
     {
         var directory = Directory.CreateTempSubdirectory("honeypot-management-audit-login-");
         var connection = new SqliteConnectionStringBuilder
@@ -117,18 +117,19 @@ public sealed class ManagementOperationAuditTests
         using var administrator = Client(app, "Administrator");
         using var verifiedLogout = await administrator.PostAsync("/api/v1/auth/logout", null);
         Assert.Equal(HttpStatusCode.OK, verifiedLogout.StatusCode);
-        var page = await ReadPageAsync(administrator, page: 1, pageSize: 20);
-        Assert.Equal(14, page.GetProperty("total").GetInt32());
+        var page = await ReadPageAsync(administrator, page: 1, pageSize: 50);
+        Assert.Equal(42, page.GetProperty("total").GetInt32());
         var statuses = page.GetProperty("items").EnumerateArray().GroupBy(item => item.GetProperty("httpStatus").GetInt32())
             .ToDictionary(group => group.Key, group => group.ToArray());
-        Assert.Equal(12, statuses[401].Length);
+        Assert.Equal(20, statuses[401].Length);
         Assert.All(statuses[401], item => AssertAudit(item, "AdminLogin", "Completed", 401, null));
-        AssertAudit(Assert.Single(statuses[429]), "AdminLogin", "Completed", 429, null);
+        Assert.Equal(21, statuses[429].Length);
+        Assert.All(statuses[429], item => AssertAudit(item, "AdminLogin", "Completed", 429, null));
         AssertAudit(Assert.Single(statuses[200]), "AdminLogout", "Completed", 200, "synthetic-existing-user");
     }
 
     [Fact]
-    public async Task InitialSetupFloodLimitsFailureAuditsButDoesNotBlockInitialization()
+    public async Task EveryFailedSetupIsAuditedWithoutBlockingInitialization()
     {
         var directory = Directory.CreateTempSubdirectory("honeypot-management-audit-setup-");
         var connection = new SqliteConnectionStringBuilder
@@ -144,8 +145,8 @@ public sealed class ManagementOperationAuditTests
         using var succeeded = await anonymous.PostAsync("/api/v1/setup/initialize?complete=true", null);
         Assert.Equal(HttpStatusCode.OK, succeeded.StatusCode);
         using var administrator = Client(app, "Administrator");
-        var page = await ReadPageAsync(administrator, page: 1, pageSize: 20);
-        Assert.Equal(13, page.GetProperty("total").GetInt32());
+        var page = await ReadPageAsync(administrator, page: 1, pageSize: 50);
+        Assert.Equal(21, page.GetProperty("total").GetInt32());
         var results = page.GetProperty("items").EnumerateArray().ToArray();
         AssertAudit(Assert.Single(results, item => item.GetProperty("httpStatus").GetInt32() == 200),
             "AdminInitialize", "Completed", 200, "synthetic-initialized-user", "synthetic-initialized-user");

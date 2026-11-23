@@ -98,6 +98,7 @@ public sealed class OverviewActivityTests
         builder.WebHost.UseUrls("http://127.0.0.1:0");
         builder.Logging.ClearProviders();
         builder.Services.AddSingleton<TimeProvider>(clock);
+        builder.Services.AddSingleton<OverviewActiveConnections>();
         builder.Services.AddSingleton<IInteractionEventStore>(events);
         builder.Services.AddSingleton<IThreatProfileStore>(threats);
         builder.Services.AddSingleton<IListenerHost>(new SnapshotListener(new("active-connection", clock.GetUtcNow(), source, 42000, "ssh", 22)));
@@ -200,10 +201,11 @@ public sealed class OverviewActivityTests
             row.EnumerateObject().Select(field => field.Name).Order(StringComparer.Ordinal));
     }
 
-    private sealed class SnapshotListener(ActiveConnectionSnapshot snapshot) : IListenerHost
+    internal sealed class SnapshotListener(ActiveConnectionSnapshot snapshot) : IListenerHost
     {
+        public IReadOnlyCollection<ActiveConnectionSnapshot> Active { get; set; } = [snapshot];
         public IReadOnlyCollection<ListenerRuntimeStatus> GetStatuses() => [];
-        public IReadOnlyCollection<ActiveConnectionSnapshot> GetActiveConnections() => [snapshot];
+        public IReadOnlyCollection<ActiveConnectionSnapshot> GetActiveConnections() => Active;
         public Task<ListenerApplyResult> ApplyAsync(ServiceInstance instance, CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task StopInstanceAsync(string instanceId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task StopAsync(CancellationToken cancellationToken = default) => throw new NotSupportedException();

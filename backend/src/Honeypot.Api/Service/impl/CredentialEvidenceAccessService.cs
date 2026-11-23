@@ -1,5 +1,4 @@
 using System.Collections.Concurrent;
-using System.Threading.RateLimiting;
 using Honeypot.Api.Common;
 using Honeypot.Api.Data;
 using Honeypot.Api.Data.Models;
@@ -15,18 +14,12 @@ namespace Honeypot.Api.Service.impl;
 public sealed class CredentialEvidenceAccessService(ICredentialEvidenceStore store, ISyslogPublisher? syslog = null,
     IResourceIdGenerator? ids = null, IDbContextFactory<HoneypotDbContext>? factory = null,
     TimeProvider? clock = null, IOptions<CredentialEvidenceOptions>? options = null,
-    ReportEventDiskBudget? diskBudget = null, ReportIngestionHealth? ingestionHealth = null,
-    IOptions<EventStorageOptions>? storage = null, ILogger<CredentialEvidenceAccessService>? logger = null)
-    : ICredentialEvidenceAccessService, IDisposable
+    ILogger<CredentialEvidenceAccessService>? logger = null, ReportIngestionHealth? health = null)
+    : ICredentialEvidenceAccessService
 {
     private const int AuditViewLimit = 10_000;
     private readonly ConcurrentQueue<CredentialEvidenceAudit> _audits = new();
     private readonly TimeProvider _clock = clock ?? TimeProvider.System;
-    // 匿名读取与导出拒绝共用进程级写入额度，防止外部请求挤占证据库。
-    private readonly FixedWindowRateLimiter? _anonymousAudit = factory is null ? null : new(new FixedWindowRateLimiterOptions
-    {
-        PermitLimit = 4, Window = TimeSpan.FromMinutes(1), QueueLimit = 0, AutoReplenishment = false,
-    });
 
     public CredentialEvidenceReadResult Read(string artifactId, AuthenticatedUser? user) => Read(artifactId, user, "Read");
 
@@ -54,7 +47,7 @@ public sealed class CredentialEvidenceAccessService(ICredentialEvidenceStore sto
             }
         }
 
-        // 先记录审计再返回原文。未鉴权的拒绝请求按固定窗口限制数据库写入。
+        // 先记录审计再返回原文。每次符合路由的拒绝请求也需留痕。
         if (!Audit(artifactId, user, result.Code, operation) && result.Evidence is not null)
             return new(500, "EVIDENCE_AUDIT_FAILED", null);
         return result;
@@ -62,13 +55,7 @@ public sealed class CredentialEvidenceAccessService(ICredentialEvidenceStore sto
 
     private bool Audit(string artifactId, AuthenticatedUser? user, string outcome, string operation)
     {
-        if (user is null && _anonymousAudit is { } limiter)
-        {
-            if (operation == "Read" && !CredentialEvidenceEndpoints.IsEvidenceId(artifactId)) return false;
-            limiter.TryReplenish();
-            using var lease = limiter.AttemptAcquire(1);
-            if (!lease.IsAcquired) return false;
-        }
+        if (factory is not null && user is null && operation == "Read" && !CredentialEvidenceEndpoints.IsEvidenceId(artifactId)) return false;
 
         // 任意路径输入不能原样进入持久审计或 Syslog。保留合法证据编号供运维关联。
         var auditArtifactId = factory is null || CredentialEvidenceEndpoints.IsEvidenceId(artifactId) ? artifactId : "";
@@ -77,7 +64,6 @@ public sealed class CredentialEvidenceAccessService(ICredentialEvidenceStore sto
         if (factory is null)
         {
             _audits.Enqueue(audit);
-            while (_audits.Count > AuditViewLimit) _audits.TryDequeue(out _);
         }
         else if (!TrySaveAudit(audit))
         {
@@ -105,9 +91,6 @@ public sealed class CredentialEvidenceAccessService(ICredentialEvidenceStore sto
             using var db = factory!.CreateDbContext();
             SqliteCredentialEvidenceStore.SetTimeout(db);
             db.Database.OpenConnection();
-            if (diskBudget is not null && ingestionHealth is not null && storage is not null &&
-                !diskBudget.CanWriteAsync(db, storage.Value, ingestionHealth, CancellationToken.None).GetAwaiter().GetResult())
-                return false;
 
             db.Set<CredentialEvidenceAccessAuditEntity>().Add(new()
             {
@@ -115,12 +98,15 @@ public sealed class CredentialEvidenceAccessService(ICredentialEvidenceStore sto
                 OccurredAtUtcTicks = audit.OccurredAtUtc.UtcTicks, Outcome = audit.Outcome, Operation = audit.Operation,
             });
             db.SaveChanges();
+            health?.RecoverStage("evidence.audit");
             return true;
         }
         catch (Exception error)
         {
             // 审计失败时拒绝原文。避免数据库异常包含输入内容。
-            logger?.LogWarning("Credential evidence audit write failed. ExceptionType={ExceptionType}", error.GetType().Name);
+            var code = ReportIngestionHealth.Classify(error);
+            health?.RecordStageFault("evidence.audit", code);
+            logger?.LogWarning("Credential evidence audit write failed. ErrorCode={ErrorCode}", code);
             return false;
         }
     }
@@ -131,13 +117,28 @@ public sealed class CredentialEvidenceAccessService(ICredentialEvidenceStore sto
 
         using var db = factory.CreateDbContext();
         SqliteCredentialEvidenceStore.SetTimeout(db);
+        return ActiveAudits(db).Take(AuditViewLimit).ToArray();
+    }
+
+    public QueryPageResult<CredentialEvidenceAudit> GetAuditPage(int? page, int? pageSize)
+    {
+        if (factory is null) return QueryPage.Create(GetAuditTrail(), page, pageSize);
+        using var db = factory.CreateDbContext();
+        SqliteCredentialEvidenceStore.SetTimeout(db);
+        var rows = ActiveAudits(db);
+        var (number, size, offset) = QueryPage.Bounds(page, pageSize);
+        var count = rows.Count();
+        return new(offset < count ? rows.Skip((int)offset).Take(size).ToArray() : [], count, number, size);
+    }
+
+    private IQueryable<CredentialEvidenceAudit> ActiveAudits(HoneypotDbContext db)
+    {
         var retentionDays = options?.Value.AuditRetentionDays ?? CredentialEvidenceOptions.DefaultAuditRetentionDays;
         var cutoff = _clock.GetUtcNow().AddDays(-retentionDays).UtcTicks;
         return db.Set<CredentialEvidenceAccessAuditEntity>().AsNoTracking().Where(row => row.OccurredAtUtcTicks > cutoff)
-            .OrderByDescending(row => row.OccurredAtUtcTicks).ThenByDescending(row => row.AuditId).Take(AuditViewLimit)
+            .OrderByDescending(row => row.OccurredAtUtcTicks).ThenByDescending(row => row.AuditId)
             .Select(row => new CredentialEvidenceAudit(row.AuditId, row.ArtifactId, row.UserId,
-                SqliteCredentialEvidenceStore.Utc(row.OccurredAtUtcTicks), row.Outcome, row.Operation)).ToArray();
+                SqliteCredentialEvidenceStore.Utc(row.OccurredAtUtcTicks), row.Outcome, row.Operation));
     }
 
-    public void Dispose() => _anonymousAudit?.Dispose();
 }

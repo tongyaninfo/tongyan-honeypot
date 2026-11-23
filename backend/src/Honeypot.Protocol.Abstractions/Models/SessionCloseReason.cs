@@ -11,4 +11,5 @@ public enum SessionCloseReason
     StorageDegraded = 6,
     ListenerStopping = 7,
     InternalError = 8,
+    AdmissionRejected = 9,
 }

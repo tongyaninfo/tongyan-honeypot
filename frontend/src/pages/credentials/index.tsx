@@ -5,7 +5,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import CredentialEvidenceModal, { type CredentialEvidenceTarget } from '@/components/CredentialEvidenceModal';
 import ExcelExportButton from '@/components/ExcelExportButton';
 import SourceIp from '@/components/SourceIp';
-import { evidenceExportBatchSize, exportCredentialEvidence, getCredentialEvidenceSummaries, loadExportRows, normalizePage, type CredentialEvidenceSummary, type PageResult } from '@/services/honeypot/api';
+import { evidenceExportBatchSize, exportCredentialEvidence, getCredentialEvidenceSummaries, loadExportRows, normalizePage, pageFromResponse, type CredentialEvidenceSummary, type PageResult } from '@/services/honeypot/api';
 import { useRealtimeRefresh } from '@/hooks/useRealtimeRefresh';
 import { getCapturedPassword, isPasswordMaterial, parseCredentialEvidenceFields } from '@/utils/credentialEvidence';
 import { type ExcelCell, MAX_EXCEL_CELL_LENGTH } from '@/utils/exportExcel';
@@ -49,7 +49,7 @@ const CredentialsPage: React.FC = () => {
     try {
       const response = await getCredentialEvidenceSummaries({ page, pageSize: 20 });
       if (requestId.current !== id) return;
-      const result = normalizePage(response.data);
+      const result = pageFromResponse(response);
       if (page > 1 && result.items.length === 0) setPage(Math.max(1, Math.ceil(result.total / 20)));
       setSnapshot(result);
       setError(false);
@@ -88,7 +88,6 @@ const CredentialsPage: React.FC = () => {
   return (
     <div>
       <Typography.Title level={3}>{t('credentials.title')}</Typography.Title>
-      {error && <Alert title={t('events.evidence.failed')} type="warning" showIcon style={{ marginBottom: 16 }} />}
       <Card extra={access.canAdmin && <ExcelExportButton
         filename="credential-evidence" sheetName={t('credentials.title')} label={t('excel.detailedEvidence')} disabled={loading || error || rows.length === 0}
         headers={['credentials.capturedAt', 'events.sourceIp', 'credentials.protocol', 'credentials.materialType', 'credentials.password', 'credentials.eventId', 'excel.connectionId', 'events.evidence.id', 'credentials.retentionUntil', 'excel.truncated'].map(t)}
@@ -131,7 +130,10 @@ const CredentialsPage: React.FC = () => {
           };
         }}
       />}>
-        {loading && rows.length === 0 ? <Spin /> : rows.length === 0 ? <Empty description="暂无记录" /> : <Table rowKey="credentialArtifactId" loading={loading} dataSource={rows} columns={columns} pagination={{ current: page, pageSize: 20, total, showSizeChanger: false, onChange: setPage }} />}
+        {error && <Alert title={t('credentials.unavailable')} type="warning" showIcon style={{ marginBottom: 16 }} />}
+        {loading && rows.length === 0 && <Spin />}
+        {!loading && !error && rows.length === 0 && <Empty description={t('credentials.empty')} />}
+        {rows.length > 0 && <Table rowKey="credentialArtifactId" loading={loading} dataSource={rows} columns={columns} pagination={{ current: page, pageSize: 20, total, showSizeChanger: false, onChange: setPage }} />}
       </Card>
       <CredentialEvidenceModal target={evidenceTarget} onClose={() => setEvidenceTarget(null)} />
     </div>

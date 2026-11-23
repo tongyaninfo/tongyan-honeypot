@@ -43,7 +43,9 @@ public sealed class AuthenticationRecordingTests
         Assert.Equal("CredentialCaptureFailed", error.Code);
         Assert.DoesNotContain("isolated-sample-password", error.ToString());
         Assert.Contains(sink.Events, item => item.EventType == "CredentialCaptureFailed");
-        Assert.DoesNotContain(sink.Events, item => item.EventType == "AuthenticationAttempted");
+        var attempted = Assert.Single(sink.Events, e => e.EventType == "AuthenticationAttempted");
+        Assert.Equal("Failed", attempted.CredentialCaptureStatus);
+        Assert.Null(attempted.CredentialArtifactId);
         Assert.All(sink.Events, item => Assert.Null(item.CredentialArtifactId));
     }
 

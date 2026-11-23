@@ -2,9 +2,9 @@
 
 此目录不启动真实数据库，不连接上游。`.NET` 验收宿主仅绑定 `127.0.0.1` 随机高端口，启动指定的客户端，检查标准认证失败、恰好一条关联认证证据及普通事件不包含口令。所有凭据均为代码中明确标记的隔离样本。
 
-2026-11-10 验收版本：Oracle `python-oracledb 26.1.0` Thin、IBM JCC `11.5.9.0`（驱动 `4.33.31`）、HBase `hbase-shaded-client 2.5.13`、Java `1.8.0_491`、SLF4J API/NOP `1.7.36`。依赖放在独立虚拟环境或临时目录，不把 jar 或本地环境路径提交仓库。
+2026-11-10 验收版本：Oracle `python-oracledb 26.1.0` Thin、IBM JCC `11.5.9.0`（驱动 `4.33.31`）、HBase `hbase-shaded-client 2.5.13`、Java `1.8.0_491`、SLF4J API/NOP `1.7.36`。依赖放在用户虚拟环境或临时目录，不把 jar 或本地环境路径提交仓库。
 
-在仓库根目录执行，先将 `PROBE_DEPS` 指向现有隔离依赖目录，将 `PROBE_PYTHON` 指向已激活的 Python 虚拟环境解释器。Python 操作遵循该虚拟环境的使用说明，不使用系统 Python 或全局安装。
+在仓库根目录执行，先将 `PROBE_DEPS` 指向现有隔离依赖目录，将 `PROBE_PYTHON` 指向用户约定的已激活虚拟环境解释器。Python 操作遵循用户的环境使用文档，不使用系统 Python 或全局安装。
 
 ```bash
 mkdir -p "$PROBE_DEPS/classes"

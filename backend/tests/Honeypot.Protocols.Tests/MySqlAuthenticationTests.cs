@@ -70,7 +70,9 @@ public sealed class MySqlAuthenticationTests
         var error = await Assert.ThrowsAsync<MySqlException>(() => connection.OpenAsync());
         Assert.NotEqual(1045, error.Number);
         Assert.Contains(server.Sink.Events, x => x.EventType == "CredentialCaptureFailed");
-        Assert.DoesNotContain(server.Sink.Events, x => x.EventType == "AuthenticationAttempted");
+        var attempted = Assert.Single(server.Sink.Events, e => e.EventType == "AuthenticationAttempted");
+        Assert.Equal("Failed", attempted.CredentialCaptureStatus);
+        Assert.Null(attempted.CredentialArtifactId);
         Assert.Empty(server.Sink.Evidence);
     }
 

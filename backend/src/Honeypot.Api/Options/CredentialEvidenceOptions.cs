@@ -12,6 +12,4 @@ public sealed class CredentialEvidenceOptions
     [Range(1, 366)]
     public int AuditRetentionDays { get; init; } = DefaultAuditRetentionDays;
 
-    [Range(1, 32_768)]
-    public int MaxStoredMiB { get; init; } = 64;
 }

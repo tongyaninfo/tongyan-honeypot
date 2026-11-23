@@ -1,9 +1,6 @@
 namespace Honeypot.Protocol.Abstractions.Models;
 
-/// <summary>
-/// 平台新建实例的默认元数据；已有实例始终使用自己的配置，不能在升级时被覆盖。
-/// HostName 与 ProductVersion 是面向攻击者的诱饵值（用于拟真），不代表任何真实资产或真实版本。
-/// </summary>
+/// <summary>平台新建实例的默认元数据；已有实例始终使用自己的配置，不能在升级时被覆盖。</summary>
 public sealed record ServiceAdapterDefaults(string Category, string? SystemGroup, string InstanceName,
     int Port, string HostName, string Product, string ProductVersion)
 {

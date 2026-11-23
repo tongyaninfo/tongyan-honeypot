@@ -106,6 +106,7 @@ export interface ListenerOverview {
 
 export interface OverviewMetrics {
   generatedAtUtc: string;
+  reportOnlyEvents?: number;
   eventCount: number;
   acceptedConnections: number;
   authenticationAttempts: number;
@@ -114,6 +115,7 @@ export interface OverviewMetrics {
   protocolViolations: number;
   sessionClosed: number;
   threatIpCount: number;
+  traceableThreatIpCount?: number;
   serviceInstanceCount: number;
   listenerCount: number;
   runningListenerCount: number;
@@ -134,6 +136,12 @@ export interface OverviewMetrics {
     diskBudgetBlocked: boolean;
     retentionAvailable: boolean;
     lastPersistedAtUtc?: string | null;
+    lockRetries?: number;
+    writeFailuresByCode?: Record<string, number>;
+    failureSinceUtc?: string | null;
+    lastRecoveredAtUtc?: string | null;
+    freeDiskBytes?: number | null;
+    diskSpaceStatus?: 'unknown' | 'low' | 'available';
   };
   host?: {
     osVersion: string;
@@ -159,10 +167,11 @@ export interface OverviewAdapterActivityFilter {
   scope: 'adapterActivity';
   adapterKey: string;
   metric: OverviewAdapterActivityMetric;
+  asOfUtc?: string;
 }
 
 export type OverviewConnectionFilter =
-  | { scope: OverviewConnectionScope }
+  | { scope: OverviewConnectionScope; asOfUtc?: string }
   | OverviewAdapterActivityFilter;
 
 export interface OverviewConnectionRow {
@@ -321,10 +330,14 @@ export interface InteractionEvent {
   authenticationAttempt?: number;
   materialType?: string;
   credentialCaptureStatus?: string;
+  credentialCaptureError?: string | null;
+  credentialMaterialBytes?: number | null;
   riskDelta?: number;
   credentialArtifactId?: string;
   /** 行为列表关联的原始步骤数；原始事件列表不返回此字段。 */
   eventCount?: number;
+  /** 从连接摘要读取；旧版本没有此字段，不能推测结束时间。 */
+  connectionCloseObserved?: boolean | null;
 }
 
 export interface ThreatIpProfile {
@@ -384,6 +397,12 @@ export function normalizePage<T>(data: PageResult<T> | T[] | undefined): PageRes
     return { items: data, total: data.length, page: 1, pageSize: data.length };
   }
   return data ?? { items: [], total: 0, page: 1, pageSize: 20 };
+}
+
+/** 只有成功返回的分页结果才能用于判断列表是否确实为空。 */
+export function pageFromResponse<T>(response: ApiResult<PageResult<T> | T[]>): PageResult<T> {
+  if (!response.success || !response.data) throw new Error(response.message);
+  return normalizePage(response.data);
 }
 
 export interface PageQuery {

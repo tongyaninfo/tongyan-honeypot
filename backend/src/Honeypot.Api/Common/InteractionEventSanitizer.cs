@@ -29,6 +29,9 @@ internal static class InteractionEventSanitizer
         AuthenticationFailureCode = Optional(item.AuthenticationFailureCode, 64),
         MaterialType = Optional(item.MaterialType, 64),
         CredentialCaptureStatus = Optional(item.CredentialCaptureStatus, 64),
+        CredentialCaptureError = item.CredentialCaptureError is "EVIDENCE_KEY_UNAVAILABLE" or "EVIDENCE_CAPTURE_FAILED" or "EVIDENCE_CONFIRMATION_TIMEOUT" or
+            "SQLITE_FULL" or "SQLITE_BUSY" or "SQLITE_LOCKED" or "SQLITE_READONLY" or "SQLITE_IOERR" or "SQLITE_CANTOPEN" ? item.CredentialCaptureError : null,
+        CredentialMaterialBytes = item.CredentialMaterialBytes is >= 0 ? item.CredentialMaterialBytes : null,
         RuleVersion = Optional(item.RuleVersion, 64),
         CredentialArtifactId = Optional(item.CredentialArtifactId, 128),
     };

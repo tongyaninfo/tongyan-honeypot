@@ -26,6 +26,7 @@ public sealed class HoneypotDbInitializer : IHostedService
         {
             await using var db = await _dbContextFactory.CreateDbContextAsync(cancellationToken);
             await db.Database.MigrateAsync(cancellationToken);
+            await ConnectionSummaryRecovery.RunAsync(db, cancellationToken);
             await db.Database.ExecuteSqlRawAsync("PRAGMA foreign_keys = ON;", cancellationToken);
             _logs?.Publish("honeypot-storage", "DATABASE_READY", SyslogSeverity.Notice);
         }

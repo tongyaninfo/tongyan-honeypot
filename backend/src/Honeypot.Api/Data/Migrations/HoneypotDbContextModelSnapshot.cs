@@ -17,6 +17,101 @@ namespace Honeypot.Api.Data.Migrations
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "10.0.9");
 
+            modelBuilder.Entity("Honeypot.Api.Data.Models.ConnectionSummaryEntity", b =>
+                {
+                    b.Property<string>("ConnectionId")
+                        .HasColumnType("TEXT")
+                        .UseCollation("NOCASE");
+
+                    b.Property<string>("AdapterKey")
+                        .IsRequired()
+                        .HasColumnType("TEXT")
+                        .UseCollation("NOCASE");
+
+                    b.Property<string>("AdmissionEventId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("AdmissionOutcome")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("AdmissionReason")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("AdmittedAtUtcTicks")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("AuthenticationActivityCount")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int?>("CloseReason")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("ClosedAtUtcTicks")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("DestinationIp")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("DestinationPort")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("LastOccurredAtUtcTicks")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("LastReceivedAtUnixMs")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("LastSequence")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("LastStage")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ListenerId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("ObservedCount")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("RepresentativeId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("RepresentativePriority")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("RepresentativeSequence")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("RepresentativeUtcTicks")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("ServiceInstanceId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SourceIp")
+                        .IsRequired()
+                        .HasColumnType("TEXT")
+                        .UseCollation("NOCASE");
+
+                    b.Property<int>("SourcePort")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("ConnectionId");
+
+                    b.HasIndex("LastReceivedAtUnixMs");
+
+                    b.HasIndex("AdmissionOutcome", "AdmittedAtUtcTicks");
+
+                    b.HasIndex("SourceIp", "AdmittedAtUtcTicks");
+
+                    b.ToTable("connection_summaries", (string)null);
+                });
+
             modelBuilder.Entity("Honeypot.Api.Data.Models.CredentialEvidenceAccessAuditEntity", b =>
                 {
                     b.Property<string>("AuditId")
@@ -318,6 +413,9 @@ namespace Honeypot.Api.Data.Migrations
                     b.Property<long>("Sequence")
                         .HasColumnType("INTEGER");
 
+                    b.Property<long?>("ShortRetentionUntilUnixMs")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("SourceIp")
                         .IsRequired()
                         .HasMaxLength(64)
@@ -327,6 +425,9 @@ namespace Honeypot.Api.Data.Migrations
                     b.HasKey("EventId");
 
                     b.HasIndex("ReceivedAtUnixMs");
+
+                    b.HasIndex("ShortRetentionUntilUnixMs")
+                        .HasFilter("\"ShortRetentionUntilUnixMs\" IS NOT NULL");
 
                     b.HasIndex("AdapterKey", "OccurredAtUtcTicks");
 
@@ -625,6 +726,10 @@ namespace Honeypot.Api.Data.Migrations
 
                     b.Property<long>("OccurredAtUnixMs")
                         .HasColumnType("INTEGER");
+
+                    b.Property<string>("Outcome")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
 
                     b.Property<string>("RiskSignal")
                         .IsRequired()

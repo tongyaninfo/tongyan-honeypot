@@ -123,3 +123,20 @@ describe('credential evidence', () => {
     expect(api.getCredentialEvidence).toHaveBeenCalledTimes(2);
   });
 });
+
+it.each(['transport', 'envelope'])('distinguishes a %s failure from a successful empty page', async (failure) => {
+  const emptyPage = { items: [], total: 0, page: 1, pageSize: 20 };
+  if (failure === 'transport') vi.mocked(api.getCredentialEvidenceSummaries).mockRejectedValueOnce(new Error('offline'));
+  else vi.mocked(api.getCredentialEvidenceSummaries).mockResolvedValueOnce({ success: false, code: 'UNAVAILABLE', message: '', data: emptyPage });
+  const failed = render(<CredentialsPage />);
+  expect(await screen.findByText('认证证据列表暂不可用')).toBeInTheDocument();
+  expect(screen.queryByText('暂无认证证据')).not.toBeInTheDocument();
+  failed.unmount();
+
+  vi.mocked(api.getCredentialEvidenceSummaries).mockResolvedValueOnce({
+    success: true, code: 'OK', message: '', data: emptyPage,
+  });
+  render(<CredentialsPage />);
+  expect(await screen.findByText('暂无认证证据')).toBeInTheDocument();
+  expect(screen.queryByText('认证证据列表暂不可用')).not.toBeInTheDocument();
+});

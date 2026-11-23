@@ -90,6 +90,10 @@ GET /api/v1/events
 
 过滤条件：`sourceIp`、`destinationPort`、`adapterKey`、`instanceId`、`listenerId`、`eventType`、`status`、`fromUtc`、`toUtc`。
 
+已实现的事件列表支持 `sourceIp`、`destinationPort`、`adapterKey`、`eventType`、`view=activity|raw` 和 `connectionIds`（最多 100 个逗号分隔的编号）。`events`、`threats` 和 `credential-evidence` 的列表均支持 `page`、`pageSize`，默认第 1 页、每页 20 条，上限 100 条。响应 `data` 包含 `items`、`total`、`page`、`pageSize`。威胁列表使用 `sort=risk` 时按分数、认证尝试次数、最近活动排序。
+
+管理台登录失败返回 HTTP 401 和 `INVALID_CREDENTIALS`。达到全局锁定阈值后，该次和后续登录请求返回 HTTP 429、`LOGIN_LOCKED` 及按秒计的 `Retry-After`。登录队列满时返回 HTTP 429 和 `LOGIN_BUSY`。
+
 当前已提供：
 
 ```http

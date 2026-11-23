@@ -1,4 +1,3 @@
-using System.Threading.RateLimiting;
 using Honeypot.Api.Data;
 using Honeypot.Api.Data.Models;
 using Honeypot.Api.Models;
@@ -13,26 +12,8 @@ public sealed class ManagementOperationAuditStore(
     IDbContextFactory<HoneypotDbContext> factory,
     IResourceIdGenerator ids,
     TimeProvider clock,
-    IOptions<EventStorageOptions> options) : IDisposable
+    IOptions<EventStorageOptions> options)
 {
-    // 匿名登录与初始化的失败审计各有独立额度，不影响成功操作。
-    private readonly FixedWindowRateLimiter _deniedLoginAudit = CreatePublicAuditLimiter();
-    private readonly FixedWindowRateLimiter _initializationAudit = CreatePublicAuditLimiter();
-
-    private static FixedWindowRateLimiter CreatePublicAuditLimiter() => new(new FixedWindowRateLimiterOptions
-    {
-        PermitLimit = 12, Window = TimeSpan.FromMinutes(1), QueueLimit = 0, AutoReplenishment = true,
-    });
-
-    internal bool TryReserveDeniedLogin() => TryReserve(_deniedLoginAudit);
-    internal bool TryReserveFailedInitialization() => TryReserve(_initializationAudit);
-
-    private static bool TryReserve(FixedWindowRateLimiter limiter)
-    {
-        using var lease = limiter.AttemptAcquire(1);
-        return lease.IsAcquired;
-    }
-
     public Task<string> BeginAsync(string operation, string? actorUserId, CancellationToken cancellationToken) =>
         InsertAsync(operation, actorUserId, null, null, cancellationToken);
 
@@ -92,9 +73,4 @@ public sealed class ManagementOperationAuditStore(
             row.HttpStatus)).ToArray(), total);
     }
 
-    public void Dispose()
-    {
-        _deniedLoginAudit.Dispose();
-        _initializationAudit.Dispose();
-    }
 }

@@ -134,6 +134,14 @@ public sealed class HttpDatabaseAuthenticationTests
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes("demo:sample")));
         await Assert.ThrowsAsync<HttpRequestException>(() => client.GetAsync($"http://127.0.0.1:{server.Port}/"));
         Assert.Empty(server.Sink.Evidence);
-        Assert.DoesNotContain(server.Sink.Events, x => x.EventType == "AuthenticationAttempted");
+        // HttpClient 可在服务器关闭连接时自动重试，每次实际到达的尝试都应留痕。
+        var attempts = server.Sink.Events.Where(e => e.EventType == "AuthenticationAttempted").ToArray();
+        Assert.NotEmpty(attempts);
+        Assert.Equal(attempts.Length, attempts.Select(e => e.ConnectionId).Distinct().Count());
+        Assert.All(attempts, item =>
+        {
+            Assert.Equal("Failed", item.CredentialCaptureStatus);
+            Assert.Null(item.CredentialArtifactId);
+        });
     }
 }

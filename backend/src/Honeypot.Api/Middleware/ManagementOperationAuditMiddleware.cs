@@ -100,11 +100,8 @@ public sealed class ManagementOperationAuditMiddleware(RequestDelegate next, ILo
         var verifiedSession = actorId is not null && succeeded;
         var shouldRecord = operation switch
         {
-            ManagementOperationCatalog.Initialize => succeeded || (status >= 400 && store.TryReserveFailedInitialization()),
-            ManagementOperationCatalog.Login => verifiedSession ||
-                (status == StatusCodes.Status429TooManyRequests && context.Items[LockoutStartedKey] is true) ||
-                (status == StatusCodes.Status401Unauthorized &&
-                    context.RequestServices.GetRequiredService<IUserIdentityService>().IsInitialized && store.TryReserveDeniedLogin()),
+            ManagementOperationCatalog.Initialize => succeeded || status >= 400,
+            ManagementOperationCatalog.Login => verifiedSession || status >= 400,
             ManagementOperationCatalog.Logout => verifiedSession,
             _ => false,
         };

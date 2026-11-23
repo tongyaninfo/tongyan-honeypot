@@ -1,5 +1,6 @@
 using Honeypot.Api.Models;
 using Honeypot.Api.Service;
+using Honeypot.Api.Service.impl;
 using Honeypot.Engine.Service;
 using Honeypot.Protocol.Abstractions.Models;
 using Honeypot.Protocol.Abstractions.Service;
@@ -9,22 +10,54 @@ namespace Honeypot.Api.Common;
 
 public static class OverviewConnectionsEndpoints
 {
+    public static void MapOverviewMetricsEndpoint(this IEndpointRouteBuilder endpoints)
+    {
+        endpoints.MapGet("/api/v1/metrics/overview", async (IInteractionEventStore events, IThreatProfileStore threats,
+            IListenerHost listeners, IServiceInstanceStore instances, ReportIngestionHealth ingestion,
+            SqliteReportService reports, OverviewActiveConnections active, CancellationToken ct) =>
+        {
+            var snapshot = active.Capture();
+            var metrics = OverviewMetricsReader.Read(events, threats, listeners, instances, snapshot.AsOfUtc, includeHost: true,
+                includeActivityCoverage: true, cancellationToken: ct);
+            var activity = events is ReportInteractionEventStore ? metrics.ActivityByHour
+                : await reports.ReadOverviewActivityAsync(snapshot.AsOfUtc, ct);
+            return Results.Ok(ApiResult<OverviewMetrics>.Ok(metrics with
+            {
+                ActivityByHour = activity,
+                ActiveConnections = snapshot.Items.Count,
+                EventStorage = EventStorageMetrics.From(ingestion),
+            }));
+        });
+    }
+
     public static void MapOverviewConnectionsEndpoints(this IEndpointRouteBuilder endpoints)
     {
         endpoints.MapGet("/api/v1/metrics/overview/connections", (
-            string? scope, string? adapterKey, string? metric, int? page, int? pageSize, IListenerHost listeners, IInteractionEventStore events,
-            IThreatProfileStore threats, TimeProvider clock, HttpContext context) =>
+            string? scope, string? adapterKey, string? metric, int? page, int? pageSize, DateTimeOffset? asOfUtc,
+            IListenerHost listeners, IInteractionEventStore events,
+            IThreatProfileStore threats, OverviewActiveConnections snapshots, TimeProvider clock, HttpContext context) =>
         {
             context.Response.Headers.CacheControl = "no-store";
+            var current = clock.GetUtcNow();
+            var now = asOfUtc is { } cutoff && cutoff <= current ? cutoff : current;
+            if (scope == "active")
+            {
+                var active = asOfUtc is { } asOf ? snapshots.Find(asOf)?.Items : listeners.GetActiveConnections();
+                if (active is null)
+                    return Results.Json(ApiResult<object>.Fail("OVERVIEW_SNAPSHOT_EXPIRED", "活动连接快照已过期，请刷新首页。"),
+                        statusCode: StatusCodes.Status410Gone);
+                return Paged(active.Select(connection => new OverviewConnectionRow(connection.ConnectionId,
+                    connection.ConnectionId, connection.AcceptedAtUtc, connection.SourceIp, connection.SourcePort,
+                    connection.AdapterKey, connection.DestinationPort)), false, page, pageSize);
+            }
             if (scope == "adapterActivity")
-                return ReadAdapterActivity(events, clock.GetUtcNow(), adapterKey, metric, page, pageSize);
+                return ReadAdapterActivity(events, now, adapterKey, metric, page, pageSize);
+            if (events is ReportInteractionEventStore persistent && scope is "accepted" or "authenticationFailures" or "threatConnections")
+                return Results.Ok(ApiResult<object>.Ok(persistent.ReadOverviewPage(scope, null, null, now, page, pageSize)));
             IEnumerable<OverviewConnectionRow>? rows = scope switch
             {
-                "active" => listeners.GetActiveConnections().Select(connection => new OverviewConnectionRow(
-                    connection.ConnectionId, connection.ConnectionId, connection.AcceptedAtUtc, connection.SourceIp,
-                    connection.SourcePort, connection.AdapterKey, connection.DestinationPort)),
                 "accepted" => events.GetAll().Where(OverviewActivityProjection.IsConnectionAccepted).Select(FromEvent),
-                "authenticationFailures" => OverviewActivityProjection.TodayAuthenticationFailures(events.GetAll(), clock.GetUtcNow()).Select(FromAuthenticationFailure),
+                "authenticationFailures" => OverviewActivityProjection.TodayAuthenticationFailures(events.GetAll(), now).Select(FromAuthenticationFailure),
                 "threatConnections" => ThreatConnections(events, threats),
                 _ => null,
             };
@@ -43,6 +76,8 @@ public static class OverviewConnectionsEndpoints
         if (metric is not ("acceptedConnections" or "authenticationFailures" or "sourceIpCount" or "protocolViolations"))
             return Results.BadRequest(ApiResult<object>.Fail("INVALID_ACTIVITY_METRIC", "请提供有效的协议活动指标。"));
 
+        if (events is ReportInteractionEventStore persistent)
+            return Results.Ok(ApiResult<object>.Ok(persistent.ReadOverviewPage("adapterActivity", adapter, metric, now, page, pageSize)));
         var activity = OverviewActivityProjection.AdapterEvents(events.GetAll(), now, adapter);
         var rows = metric switch
         {

@@ -19,6 +19,9 @@ public sealed class EventStorageOptions
     [Range(1, 366)]
     public int DetailRetentionDays { get; init; } = 30;
 
+    [Range(1, 168)]
+    public int HandshakeRetentionHours { get; init; } = 48;
+
     [Range(1, 366)]
     public int ThreatRetentionDays { get; init; } = 30;
 
@@ -28,9 +31,4 @@ public sealed class EventStorageOptions
     [Range(1, 366)]
     public int ReportRetentionDays { get; init; } = 90;
 
-    [Range(8, 32768)]
-    public int DatabaseBudgetMiB { get; init; } = 1024;
-
-    [Range(8, 32768)]
-    public int MinimumFreeDiskMiB { get; init; } = 256;
 }

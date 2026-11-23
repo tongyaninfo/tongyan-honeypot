@@ -14,7 +14,8 @@ internal sealed class ConnectionAdmission(ConnectionAdmissionOptions options, Ti
     private int _active;
     private int _started;
 
-    public bool TryEnter(RuntimeListener listener, IPAddress source)
+    /// <summary>成功预留连接额度时返回 null；其他情况返回可写入连接记录的固定拒绝原因。</summary>
+    public string? TryEnter(RuntimeListener listener, IPAddress source)
     {
         lock (_gate)
         {
@@ -22,19 +23,20 @@ internal sealed class ConnectionAdmission(ConnectionAdmissionOptions options, Ti
             if (clock.GetElapsedTime(_windowStart, now) >= RateWindow)
                 StartWindow(now);
 
-            if (_active >= options.MaxConcurrentConnections || _started >= options.MaxNewConnectionsPerSecond ||
-                listener.ActiveConnections >= listener.Binding.MaxConnections ||
-                listener.ConnectionsByIp.GetValueOrDefault(source) >= listener.Binding.MaxConnectionsPerIp)
-                return false;
+            if (_active >= options.MaxConcurrentConnections) return "global_concurrency";
+            if (_started >= options.MaxNewConnectionsPerSecond) return "global_rate";
+            if (listener.ActiveConnections >= listener.Binding.MaxConnections) return "listener_concurrency";
+            if (listener.ConnectionsByIp.GetValueOrDefault(source) >= listener.Binding.MaxConnectionsPerIp)
+                return "listener_source_concurrency";
 
             if (!_sources.TryGetValue(source, out var entry))
             {
                 // 表满时直接拒绝新来源，避免通过来源轮换制造额外分配或重置已有来源计数。
-                if (_sources.Count >= options.MaxTrackedSources) return false;
+                if (_sources.Count >= options.MaxTrackedSources) return "tracked_sources";
                 _sources.Add(source, entry = new SourceWindow());
             }
-            if (entry.Active >= options.MaxConcurrentConnectionsPerSource || entry.Started >= options.MaxNewConnectionsPerSourcePerSecond)
-                return false;
+            if (entry.Active >= options.MaxConcurrentConnectionsPerSource) return "source_concurrency";
+            if (entry.Started >= options.MaxNewConnectionsPerSourcePerSecond) return "source_rate";
 
             _active++;
             _started++;
@@ -42,7 +44,7 @@ internal sealed class ConnectionAdmission(ConnectionAdmissionOptions options, Ti
             entry.Started++;
             listener.ConnectionsByIp[source] = listener.ConnectionsByIp.GetValueOrDefault(source) + 1;
             Interlocked.Increment(ref listener.ActiveConnections);
-            return true;
+            return null;
         }
     }
 

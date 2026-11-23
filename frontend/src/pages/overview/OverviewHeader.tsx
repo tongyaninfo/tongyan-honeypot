@@ -163,7 +163,7 @@ export default function OverviewHeader({
     text: string,
     value?: number,
   ) => (
-    <OverviewConnectionsPopover scope={scope} label={text}>
+    <OverviewConnectionsPopover scope={scope} label={text} asOfUtc={snapshot?.generatedAtUtc}>
       {label(icon, text)}
       <span className={styles.value}>{formatCount(value)}</span>
     </OverviewConnectionsPopover>
@@ -228,7 +228,7 @@ export default function OverviewHeader({
             {connectionsMetric(
               'accepted',
               <DesktopOutlined aria-hidden style={{ color: theme.colorInfo }} />,
-              '连接总数',
+              '近 24 小时接纳连接',
               snapshot?.acceptedConnections,
             )}
           </div>
@@ -246,8 +246,10 @@ export default function OverviewHeader({
             'threatConnections',
             <RadarChartOutlined aria-hidden style={{ color: theme.colorWarning }} />,
             '威胁 IP',
-            snapshot?.threatIpCount,
+            snapshot?.traceableThreatIpCount ?? snapshot?.threatIpCount,
           )}
+          {snapshot?.traceableThreatIpCount != null && snapshot.threatIpCount > snapshot.traceableThreatIpCount &&
+            <span className={styles.hint}>另有 {formatCount(snapshot.threatIpCount - snapshot.traceableThreatIpCount)} 个活跃档案缺少留存的连接明细</span>}
           <span className={styles.hint}>
             认证证据 {formatCount(credentialCount)}
           </span>

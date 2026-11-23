@@ -254,17 +254,41 @@ public sealed class TcpListenerHost : IListenerHost
             {
                 var client = await runtime.Listener.AcceptTcpClientAsync(runtime.Cancellation.Token);
                 Interlocked.Increment(ref runtime.AcceptedCount);
-                var remote = GetRemoteEndpoint(client);
+                var acceptedAt = _clock.GetUtcNow();
+                var remote = GetSocketEndpoint(client, remote: true);
+                var local = GetSocketEndpoint(client, remote: false);
                 var source = remote is null ? null : NormalizeAddress(remote.Address);
-                if (remote is null || source is null || runtime.Cancellation.IsCancellationRequested || !_admission.TryEnter(runtime, source))
+                var rejection = source is null ? "endpoint_unavailable" : runtime.Cancellation.IsCancellationRequested
+                    ? "listener_stopping" : _admission.TryEnter(runtime, source);
+                var first = new InteractionEvent
                 {
-                    // 拒绝路径只关闭 socket 并增加计数，不分配会话或写入事件。
+                    EventId = _idGenerator.NewEventId(), ConnectionId = _idGenerator.NewConnectionId(), Sequence = 1,
+                    EventType = rejection is null ? "ConnectionAccepted" : "ConnectionRejected",
+                    OccurredAtUtc = acceptedAt, SourceIp = source?.ToString() ?? "", SourcePort = remote?.Port ?? 0,
+                    DestinationIp = local is null ? runtime.Binding.BindAddress : NormalizeAddress(local.Address).ToString(),
+                    DestinationPort = local?.Port ?? runtime.Binding.Port, Transport = "tcp",
+                    ListenerId = runtime.Binding.ListenerId, ServiceInstanceId = runtime.Instance.InstanceId,
+                    AdapterKey = runtime.Instance.AdapterKey, ProfileId = runtime.Instance.Profile.ProfileId,
+                    Stage = rejection is null ? "accepted" : "admission", Outcome = rejection is null ? "recorded" : "rejected",
+                    PayloadSummary = rejection, RiskDelta = rejection is null ? 1 : 0,
+                };
+                if (rejection is not null)
+                {
                     Interlocked.Increment(ref runtime.RejectedCount);
                     client.Dispose();
+                    // 串行等待留痕对 accept 施加背压，拒绝路径不创建协议会话或无界后台任务。
+                    var closed = first with
+                    {
+                        EventId = _idGenerator.NewEventId(), Sequence = 2, EventType = "SessionClosed",
+                        OccurredAtUtc = _clock.GetUtcNow(), Stage = "closed", Outcome = "admission_rejected",
+                        CloseReason = SessionCloseReason.AdmissionRejected,
+                    };
+                    await RecordRejectedConnectionAsync(runtime, first, closed);
                     continue;
                 }
 
-                var sessionTask = RunAdmittedConnectionAsync(runtime, client, remote, source);
+                var endpoint = local ?? new IPEndPoint(ParseBindAddress(runtime.Binding.BindAddress), runtime.Binding.Port);
+                var sessionTask = RunAdmittedConnectionAsync(runtime, client, remote!, endpoint, source!, first);
                 runtime.Sessions.TryAdd(sessionTask, 0);
                 _ = sessionTask.ContinueWith(completed =>
                 {
@@ -291,13 +315,29 @@ public sealed class TcpListenerHost : IListenerHost
         }
     }
 
-    private async Task RunAdmittedConnectionAsync(RuntimeListener runtime, TcpClient client, IPEndPoint remote, IPAddress source)
+    private async Task RecordRejectedConnectionAsync(RuntimeListener runtime, InteractionEvent first, InteractionEvent closed)
     {
-        string? connectionId = null;
+        // 真正完成 TCP accept 的拒绝也有独立 ID；停监听不能撤销已经发生的接纳和关闭。
+        foreach (var item in new[] { first, closed })
+        {
+            try
+            {
+                var result = await RecordTransportEventAsync(item);
+                if (!result.Recorded) WarnEventWriteFailure(runtime, result.Code);
+            }
+            catch (Exception)
+            {
+                WarnEventWriteFailure(runtime, "ADMISSION_EVENT_WRITE_FAILED");
+            }
+        }
+    }
+
+    private async Task RunAdmittedConnectionAsync(RuntimeListener runtime, TcpClient client, IPEndPoint remote,
+        IPEndPoint local, IPAddress source, InteractionEvent first)
+    {
         try
         {
-            connectionId = _idGenerator.NewConnectionId();
-            await HandleConnectionAsync(runtime, client, remote, source, connectionId);
+            await HandleConnectionAsync(runtime, client, remote, local, first);
         }
         finally
         {
@@ -305,59 +345,51 @@ public sealed class TcpListenerHost : IListenerHost
             try { client.Dispose(); }
             finally
             {
-                if (connectionId is not null) runtime.ActiveConnectionDetails.TryRemove(connectionId, out _);
+                runtime.ActiveConnectionDetails.TryRemove(first.ConnectionId, out _);
                 _admission.Exit(runtime, source);
             }
         }
     }
 
-    private async Task HandleConnectionAsync(RuntimeListener runtime, TcpClient client, IPEndPoint remote, IPAddress source, string connectionId)
+    private async Task HandleConnectionAsync(RuntimeListener runtime, TcpClient client, IPEndPoint remote,
+        IPEndPoint local, InteractionEvent accepted)
     {
-        var remoteIp = source.ToString();
-        var session = new TcpHoneypotSession(client, connectionId, runtime.Instance.Profile.MaxSessionBytes);
+        var connectionId = accepted.ConnectionId;
+        var remoteIp = accepted.SourceIp;
+        var listenerStopping = runtime.Cancellation.Token;
+        TcpHoneypotSession? session = null;
         var context = new ProtocolSessionContext(
             connectionId,
             runtime.Binding.ListenerId,
             runtime.Instance.InstanceId,
             runtime.Instance.AdapterKey,
             runtime.Instance.Profile.ProfileId,
-            session.RemoteEndPoint,
-            session.LocalEndPoint,
-            DateTimeOffset.UtcNow);
+            remote,
+            local,
+            accepted.OccurredAtUtc);
 
         var sequencedSink = new SequencedEventSink(_eventSink, _idGenerator, context, 1);
         SessionCloseReason? failureReason = null;
         var failureReported = false;
         try
         {
-            var accepted = new InteractionEvent
-            {
-                EventId = _idGenerator.NewEventId(),
-                ConnectionId = connectionId,
-                Sequence = 1,
-                EventType = "ConnectionAccepted",
-                OccurredAtUtc = context.AcceptedAtUtc,
-                SourceIp = remoteIp,
-                SourcePort = remote.Port,
-                DestinationIp = GetIp(session.LocalEndPoint),
-                DestinationPort = GetPort(session.LocalEndPoint),
-                Transport = "tcp",
-                ListenerId = runtime.Binding.ListenerId,
-                ServiceInstanceId = runtime.Instance.InstanceId,
-                AdapterKey = runtime.Instance.AdapterKey,
-                ProfileId = runtime.Instance.Profile.ProfileId,
-                RiskDelta = 1,
-            };
-
             // 活动连接跟随接纳额度的生命周期，即使事件仍在等待存储也可见。
             runtime.ActiveConnectionDetails[connectionId] = new(connectionId, accepted.OccurredAtUtc,
                 accepted.SourceIp, accepted.SourcePort, accepted.AdapterKey, accepted.DestinationPort);
-            var appendResult = await RecordConnectionAcceptedAsync(accepted, runtime.Cancellation.Token);
+            var appendResult = await RecordTransportEventAsync(accepted);
             if (!appendResult.Recorded)
             {
                 WarnEventWriteFailure(runtime, appendResult.Code);
                 failureReported = true;
-                await session.CloseAsync(SessionCloseReason.StorageDegraded);
+                failureReason = SessionCloseReason.StorageDegraded;
+                return;
+            }
+            // 已经提交首条记录才访问协议流，对端在 accept 后立即复位仍然可追查。
+            listenerStopping.ThrowIfCancellationRequested();
+            try { session = new TcpHoneypotSession(client, connectionId, runtime.Instance.Profile.MaxSessionBytes); }
+            catch (InvalidOperationException) when (!client.Connected)
+            {
+                failureReason = SessionCloseReason.ClientClosed;
                 return;
             }
             if (!_adapterRegistry.TryGet(runtime.Instance.AdapterKey, out var adapter) || adapter is null)
@@ -366,11 +398,11 @@ public sealed class TcpListenerHost : IListenerHost
                 return;
             }
 
-            using var sessionTimeout = CancellationTokenSource.CreateLinkedTokenSource(runtime.Cancellation.Token);
+            using var sessionTimeout = CancellationTokenSource.CreateLinkedTokenSource(listenerStopping);
             sessionTimeout.CancelAfter(runtime.Instance.Profile.IdleTimeout);
             await adapter.HandleAsync(session, context, runtime.Instance.Profile, sequencedSink, sessionTimeout.Token);
         }
-        catch (OperationCanceledException) when (runtime.Cancellation.IsCancellationRequested)
+        catch (OperationCanceledException) when (listenerStopping.IsCancellationRequested)
         {
             failureReason = SessionCloseReason.ListenerStopping;
         }
@@ -381,7 +413,7 @@ public sealed class TcpListenerHost : IListenerHost
         catch (Exception exception) when (exception is IOException or SocketException)
         {
             // 远端断开和会话字节预算触发不属于宿主内部错误，不输出底层异常正文。
-            failureReason = session.ResourceLimitExceeded ? SessionCloseReason.ResourceLimitExceeded : SessionCloseReason.ClientClosed;
+            failureReason = session?.ResourceLimitExceeded == true ? SessionCloseReason.ResourceLimitExceeded : SessionCloseReason.ClientClosed;
         }
         catch (AuthenticationRecordingException exception)
         {
@@ -401,8 +433,8 @@ public sealed class TcpListenerHost : IListenerHost
         }
         finally
         {
-            var reason = failureReason ?? (session.ResourceLimitExceeded ? SessionCloseReason.ResourceLimitExceeded
-                : session.CloseReason ?? SessionCloseReason.AdapterCompleted);
+            var reason = failureReason ?? (session?.ResourceLimitExceeded == true ? SessionCloseReason.ResourceLimitExceeded
+                : session?.CloseReason ?? SessionCloseReason.AdapterCompleted);
             if (!failureReported && reason == SessionCloseReason.StorageDegraded)
             {
                 WarnEventWriteFailure(runtime, "SESSION_STORAGE_DEGRADED");
@@ -413,26 +445,30 @@ public sealed class TcpListenerHost : IListenerHost
                 _logger.LogError("Session {ConnectionId} closed on listener {ListenerId}: {ErrorCode}.",
                     connectionId, runtime.Binding.ListenerId, "SESSION_INTERNAL_ERROR");
             }
-            try { await session.CloseAsync(reason); }
+            try
+            {
+                if (session is null) client.Dispose();
+                else await session.CloseAsync(reason);
+            }
             catch (Exception)
             {
                 // 资源释放失败单独诊断，不能跳过连接计数回收或伪造正常结束。
                 reason = SessionCloseReason.InternalError;
                 _logger.LogError("Session {ConnectionId} disposal failed: {ErrorCode}.", connectionId, "SESSION_DISPOSE_FAILED");
             }
-            if (reason == SessionCloseReason.AdapterCompleted && session.CloseReason is { } observedReason)
+            if (reason == SessionCloseReason.AdapterCompleted && session?.CloseReason is { } observedReason)
                 reason = observedReason;
             // 最终事件只在这里生成一次，覆盖所有早退/异常分支；宿主停止的令牌不能取消关闭留痕。
             using var finalDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(2));
             try
             {
-                if (session.ResourceLimitExceeded)
+                if (session?.ResourceLimitExceeded == true)
                     await sequencedSink.AppendAsync(new InteractionEvent
                     {
                         EventId = _idGenerator.NewEventId(), ConnectionId = connectionId,
-                        EventType = "ResourceLimitExceeded", OccurredAtUtc = DateTimeOffset.UtcNow,
+                        EventType = "ResourceLimitExceeded", OccurredAtUtc = _clock.GetUtcNow(),
                         SourceIp = remoteIp, SourcePort = remote.Port,
-                        DestinationIp = GetIp(session.LocalEndPoint), DestinationPort = GetPort(session.LocalEndPoint),
+                        DestinationIp = accepted.DestinationIp, DestinationPort = accepted.DestinationPort,
                         ListenerId = context.ListenerId, ServiceInstanceId = context.ServiceInstanceId,
                         AdapterKey = context.AdapterKey, ProfileId = context.ProfileId,
                         Stage = "transport", Outcome = "resource_limit", PayloadSummary = "Session byte limit exceeded",
@@ -448,8 +484,8 @@ public sealed class TcpListenerHost : IListenerHost
                 var closed = new InteractionEvent
                 {
                     EventId = _idGenerator.NewEventId(), ConnectionId = connectionId, EventType = "SessionClosed",
-                    OccurredAtUtc = DateTimeOffset.UtcNow, SourceIp = remoteIp, SourcePort = remote.Port,
-                    DestinationIp = GetIp(session.LocalEndPoint), DestinationPort = GetPort(session.LocalEndPoint),
+                    OccurredAtUtc = _clock.GetUtcNow(), SourceIp = remoteIp, SourcePort = remote.Port,
+                    DestinationIp = accepted.DestinationIp, DestinationPort = accepted.DestinationPort,
                     Transport = "tcp", ListenerId = context.ListenerId, ServiceInstanceId = context.ServiceInstanceId,
                     AdapterKey = context.AdapterKey, ProfileId = context.ProfileId, Stage = "closed", CloseReason = reason,
                     Outcome = reason switch
@@ -465,23 +501,21 @@ public sealed class TcpListenerHost : IListenerHost
                     },
                 };
                 var closedResult = await sequencedSink.AppendAsync(closed, closeDeadline.Token).AsTask().WaitAsync(closeDeadline.Token);
-                if (!closedResult.Recorded && (!failureReported || reason != SessionCloseReason.StorageDegraded))
-                    WarnEventWriteFailure(runtime, closedResult.Code);
+                if (!closedResult.Recorded) WarnEventWriteFailure(runtime, closedResult.Code);
             }
             catch (Exception)
             {
-                if (!failureReported || reason != SessionCloseReason.StorageDegraded)
-                    WarnEventWriteFailure(runtime, "SESSION_CLOSE_RECORD_FAILED");
+                // 关闭事件有独立写入结果，即使接纳或认证已失败，也要计数。
+                WarnEventWriteFailure(runtime, "SESSION_CLOSE_RECORD_FAILED");
             }
         }
     }
 
-    private async Task<EventAppendResult> RecordConnectionAcceptedAsync(InteractionEvent accepted, CancellationToken stopping)
+    private async Task<EventAppendResult> RecordTransportEventAsync(InteractionEvent item)
     {
-        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(stopping);
-        deadline.CancelAfter(_acceptedEventTimeout);
-        try { return await _eventSink.AppendAsync(accepted, deadline.Token).AsTask().WaitAsync(deadline.Token); }
-        catch (OperationCanceledException) when (!stopping.IsCancellationRequested && deadline.IsCancellationRequested)
+        using var deadline = new CancellationTokenSource(_acceptedEventTimeout);
+        try { return await _eventSink.AppendAsync(item, deadline.Token).AsTask().WaitAsync(deadline.Token); }
+        catch (OperationCanceledException) when (deadline.IsCancellationRequested)
         { return EventAppendResult.DegradedResult("CONNECTION_EVENT_TIMEOUT", "连接事件写入超时。"); }
     }
 
@@ -530,9 +564,9 @@ public sealed class TcpListenerHost : IListenerHost
     private static string ListenerKey(string bindAddress, int port, string transport) =>
         $"{bindAddress.Trim().ToLowerInvariant()}:{port}/{transport.Trim().ToLowerInvariant()}";
 
-    private static IPEndPoint? GetRemoteEndpoint(TcpClient client)
+    private static IPEndPoint? GetSocketEndpoint(TcpClient client, bool remote)
     {
-        try { return client.Client.RemoteEndPoint as IPEndPoint; }
+        try { return (remote ? client.Client.RemoteEndPoint : client.Client.LocalEndPoint) as IPEndPoint; }
         catch (SocketException) { return null; }
     }
 
@@ -585,10 +619,6 @@ public sealed class TcpListenerHost : IListenerHost
             return true;
         }
     }
-
-    private static string GetIp(EndPoint endpoint) => (endpoint as IPEndPoint)?.Address.ToString() ?? "0.0.0.0";
-
-    private static int GetPort(EndPoint endpoint) => (endpoint as IPEndPoint)?.Port ?? 0;
 
     private static ListenerRuntimeStatus ToStatus(RuntimeListener runtime) => new(
         runtime.Binding.ListenerId,
@@ -646,7 +676,7 @@ public sealed class TcpListenerHost : IListenerHost
         }
     }
 
-    private sealed class SequencedEventSink : IInteractionEventSink, ICredentialEvidenceSink
+    private sealed class SequencedEventSink : IInteractionEventSink, ICredentialEvidenceSink, ICredentialEventSink
     {
         private readonly IInteractionEventSink _inner;
         private readonly IConnectionIdGenerator _idGenerator;
@@ -661,9 +691,14 @@ public sealed class TcpListenerHost : IListenerHost
             _sequence = initialSequence;
         }
 
-        public ValueTask<EventAppendResult> AppendAsync(InteractionEvent interactionEvent, CancellationToken cancellationToken = default)
-        {
-            var normalized = interactionEvent with
+        public ValueTask<EventAppendResult> AppendAsync(InteractionEvent interactionEvent, CancellationToken cancellationToken = default) =>
+            _inner.AppendAsync(Sequence(interactionEvent), cancellationToken);
+
+        public ValueTask<CredentialEventResult> AppendWithEvidenceAsync(InteractionEvent item, CredentialEvidence evidence, CancellationToken cancellationToken = default) =>
+            CredentialEventRecording.AppendAsync(_inner, Sequence(item), evidence, cancellationToken);
+
+        private InteractionEvent Sequence(InteractionEvent interactionEvent) =>
+            interactionEvent with
             {
                 EventId = string.IsNullOrWhiteSpace(interactionEvent.EventId) ? _idGenerator.NewEventId() : interactionEvent.EventId,
                 ConnectionId = _context.ConnectionId,
@@ -673,8 +708,6 @@ public sealed class TcpListenerHost : IListenerHost
                 AdapterKey = _context.AdapterKey,
                 ProfileId = _context.ProfileId,
             };
-            return _inner.AppendAsync(normalized, cancellationToken);
-        }
 
         public ValueTask<string> StoreAsync(CredentialEvidence evidence, CancellationToken cancellationToken = default) =>
             _inner is ICredentialEvidenceSink sink

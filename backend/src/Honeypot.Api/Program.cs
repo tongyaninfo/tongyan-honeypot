@@ -40,9 +40,10 @@ builder.Services.AddSingleton<IUserIdentityService, FileUserIdentityService>();
 builder.Services.AddIPLocation();
 builder.Services.AddConnectionMapTarget();
 var databasePath = HoneypotDbOptions.ResolveDatabasePath(builder.Configuration, builder.Environment);
-builder.Services.AddDbContextFactory<HoneypotDbContext>(options => options.UseSqlite($"Data Source={databasePath};Cache=Shared;Foreign Keys=True"));
+builder.Services.AddDbContextFactory<HoneypotDbContext>(options => options.UseSqlite($"Data Source={databasePath};Cache=Private;Foreign Keys=True"));
 builder.Services.AddHostedService<HoneypotDbInitializer>();
 builder.Services.AddHoneypotRuntime();
+builder.Services.AddSingleton<OverviewActiveConnections>();
 builder.Services.AddSingleton<ServiceInstanceOperations>();
 builder.Services.AddBuiltinProtocolAdapters();
 builder.Services.AddSingleton<IServiceInstanceStore, SqliteServiceInstanceStore>();
@@ -368,34 +369,21 @@ app.MapCredentialEvidenceEndpoints();
 app.MapPasswordBookEndpoints();
 app.MapManagementOperationAuditEndpoints();
 
-app.MapGet("/api/v1/metrics/summary", (IInteractionEventStore events, IThreatProfileStore threats, IListenerHost listenerHost, ReportIngestionHealth ingestion) =>
+app.MapGet("/api/v1/metrics/summary", (IInteractionEventStore events, IThreatProfileStore threats, IListenerHost listenerHost, ReportIngestionHealth ingestion, TimeProvider clock) =>
 {
-    var allEvents = events.GetAll();
+    var stats = OverviewMetricsReader.Statistics(events, clock.GetUtcNow());
     return Results.Ok(ApiResult<object>.Ok(new
     {
-        acceptedConnections = allEvents.Count(item => item.EventType == "ConnectionAccepted"),
-        authenticationAttempts = allEvents.Count(item => item.EventType == "AuthenticationAttempted"),
-        protocolViolations = allEvents.Count(item => item.EventType == "ProtocolViolation"),
+        acceptedConnections = stats.Accepted,
+        authenticationAttempts = stats.Attempts,
+        protocolViolations = stats.Violations,
         threatIps = threats.Count(),
         listeners = listenerHost.GetStatuses(),
         eventStorage = EventStorageMetrics.From(ingestion),
     }));
 });
 
-app.MapGet("/api/v1/metrics/overview", async (
-    IInteractionEventStore events, IThreatProfileStore threats, IListenerHost listenerHost, IServiceInstanceStore instances,
-    ReportIngestionHealth ingestion, SqliteReportService reports, TimeProvider clock, CancellationToken cancellationToken) =>
-{
-    var now = clock.GetUtcNow();
-    var activity = await reports.ReadOverviewActivityAsync(now, cancellationToken);
-    var metrics = OverviewMetricsReader.Read(events, threats, listenerHost, instances, now, includeHost: true);
-    return Results.Ok(ApiResult<OverviewMetrics>.Ok(metrics with
-    {
-        ActivityByHour = activity,
-        EventStorage = EventStorageMetrics.From(ingestion),
-    }));
-});
-
+app.MapOverviewMetricsEndpoint();
 app.MapOverviewConnectionsEndpoints();
 app.MapOverviewConnectionMapEndpoints();
 

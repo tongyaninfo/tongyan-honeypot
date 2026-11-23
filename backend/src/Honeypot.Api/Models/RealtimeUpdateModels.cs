@@ -34,9 +34,13 @@ public sealed record RealtimeInteractionEvent(
     public int? AuthenticationAttempt { get; init; }
     public string? MaterialType { get; init; }
     public string? CredentialCaptureStatus { get; init; }
+    public int? CredentialMaterialBytes { get; init; }
+    public string? CredentialCaptureError { get; init; }
     public string? CloseReason { get; init; }
     /// <summary>行为视图关联的连接步骤数量；实时单事件默认为 1。</summary>
     public int EventCount { get; init; } = 1;
+    /// <summary>查询连接摘要时提供；未观测到关闭不能推定连接已经正常退出。</summary>
+    public bool? ConnectionCloseObserved { get; init; }
 
     public static RealtimeInteractionEvent From(InteractionEvent source) => new(
         source.EventId,
@@ -69,6 +73,8 @@ public sealed record RealtimeInteractionEvent(
         AuthenticationAttempt = source.AuthenticationAttempt,
         MaterialType = source.MaterialType,
         CredentialCaptureStatus = source.CredentialCaptureStatus,
+        CredentialMaterialBytes = source.CredentialMaterialBytes,
+        CredentialCaptureError = source.CredentialCaptureError,
         CloseReason = source.CloseReason?.ToString(),
     };
 }

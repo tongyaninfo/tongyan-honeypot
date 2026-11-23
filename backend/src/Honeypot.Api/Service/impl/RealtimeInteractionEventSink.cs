@@ -8,7 +8,7 @@ namespace Honeypot.Api.Service.impl;
 /// <summary>
 /// 在既有事件存储旁路广播事件，保留认证证据接口转发能力。
 /// </summary>
-public sealed class RealtimeInteractionEventSink : IInteractionEventSink, ICredentialEvidenceSink
+public sealed class RealtimeInteractionEventSink : IInteractionEventSink, ICredentialEvidenceSink, ICredentialEventSink
 {
     private readonly IInteractionEventStore _inner;
     private readonly ICredentialEvidenceSink _credentialSink;
@@ -36,10 +36,20 @@ public sealed class RealtimeInteractionEventSink : IInteractionEventSink, ICrede
     {
         interactionEvent = InteractionEventSanitizer.Sanitize(interactionEvent);
         var result = await _inner.AppendAsync(interactionEvent, cancellationToken);
-        if (!result.Recorded || result.IsDuplicate)
-        {
-            return result;
-        }
+        await NotifyCommittedAsync(interactionEvent, result, cancellationToken);
+        return result;
+    }
+
+    public async ValueTask<CredentialEventResult> AppendWithEvidenceAsync(InteractionEvent item, CredentialEvidence evidence, CancellationToken cancellationToken = default)
+    {
+        var saved = await CredentialEventRecording.AppendAsync(_inner, InteractionEventSanitizer.Sanitize(item), evidence, cancellationToken);
+        await NotifyCommittedAsync(saved.Event, saved.Result, cancellationToken);
+        return saved;
+    }
+
+    private async Task NotifyCommittedAsync(InteractionEvent interactionEvent, EventAppendResult result, CancellationToken cancellationToken)
+    {
+        if (!result.Recorded || result.IsDuplicate) return;
 
         SyslogInteractionProjection.PublishSafely(_syslog, SyslogInteractionProjection.AppName(interactionEvent.AdapterKey),
             interactionEvent.EventType, SyslogInteractionProjection.Severity(interactionEvent),
@@ -55,7 +65,6 @@ public sealed class RealtimeInteractionEventSink : IInteractionEventSink, ICrede
             _logger.LogError("Realtime event broadcast failed for {EventId}: {ErrorCode}", interactionEvent.EventId, exception.GetType().Name);
         }
 
-        return result;
     }
 
     public ValueTask<string> StoreAsync(
